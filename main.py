@@ -1,11 +1,17 @@
+import json
 import os
+import re
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 APP_NAME = "GBM Flipbook"
 DEFAULT_STORAGE_PATH = "/data/flipbooks"
 FALLBACK_STORAGE_PATH = "/tmp/flipbooks"
+SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 active_storage_path: Path | None = None
 storage_warning: str | None = None
@@ -36,10 +42,47 @@ def ensure_storage_path() -> Path:
     return active_storage_path
 
 
+def validate_slug(slug: str) -> str:
+    normalized_slug = slug.strip().lower()
+    if not SLUG_PATTERN.fullmatch(normalized_slug):
+        raise HTTPException(
+            status_code=400,
+            detail="Slug must use lowercase letters, numbers, and single hyphens only.",
+        )
+    return normalized_slug
+
+
+def publication_dir(slug: str) -> Path:
+    storage_path = active_storage_path or ensure_storage_path()
+    return storage_path / validate_slug(slug)
+
+
+def manifest_path(slug: str) -> Path:
+    return publication_dir(slug) / "manifest.json"
+
+
+def read_manifest(slug: str) -> dict[str, Any]:
+    path = manifest_path(slug)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Publication manifest not found.")
+
+    with path.open("r", encoding="utf-8") as manifest_file:
+        return json.load(manifest_file)
+
+
+def write_manifest(slug: str, manifest: dict[str, Any]) -> Path:
+    path = manifest_path(slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file, indent=2)
+        manifest_file.write("\n")
+    return path
+
+
 app = FastAPI(
     title=APP_NAME,
     description="Minimal Render-deployable API for the GBM Flipbook service.",
-    version="0.1.1",
+    version="0.2.0",
 )
 
 
@@ -69,9 +112,71 @@ def health_check() -> dict[str, str]:
 
 
 @app.get("/book/{slug}")
-def read_book(slug: str) -> dict[str, str]:
+def read_book(slug: str) -> dict[str, Any]:
+    normalized_slug = validate_slug(slug)
+    try:
+        manifest = read_manifest(normalized_slug)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        return {
+            "slug": normalized_slug,
+            "status": "placeholder",
+            "message": "Upload a PDF for this slug to create the first flipbook manifest.",
+        }
+
     return {
-        "slug": slug,
-        "status": "placeholder",
+        "slug": normalized_slug,
+        "status": manifest["status"],
+        "title": manifest["title"],
+        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
         "message": "Flipbook viewer will be implemented in a future phase.",
+    }
+
+
+@app.get("/api/publications/{slug}/manifest")
+def get_publication_manifest(slug: str) -> dict[str, Any]:
+    return read_manifest(slug)
+
+
+@app.post("/api/publications/{slug}/upload")
+def upload_publication_pdf(
+    slug: str,
+    file: UploadFile = File(...),
+    title: str | None = Form(default=None),
+    description: str | None = Form(default=None),
+) -> dict[str, Any]:
+    normalized_slug = validate_slug(slug)
+    filename = file.filename or ""
+
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Upload must be a PDF file.")
+
+    destination_dir = publication_dir(normalized_slug)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = destination_dir / "original.pdf"
+
+    with pdf_path.open("wb") as output_file:
+        shutil.copyfileobj(file.file, output_file)
+
+    now = datetime.now(timezone.utc).isoformat()
+    manifest = {
+        "slug": normalized_slug,
+        "title": title or normalized_slug.replace("-", " ").title(),
+        "description": description or "",
+        "status": "uploaded",
+        "original_pdf_path": str(pdf_path),
+        "page_count": None,
+        "created_at": now,
+        "updated_at": now,
+        "viewer_settings": {},
+    }
+    manifest_file_path = write_manifest(normalized_slug, manifest)
+
+    return {
+        "status": "uploaded",
+        "slug": normalized_slug,
+        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
+        "manifest_path": str(manifest_file_path),
+        "pdf_path": str(pdf_path),
     }
