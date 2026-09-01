@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from pypdf import PdfReader
 
 APP_NAME = "GBM Flipbook"
 DEFAULT_STORAGE_PATH = "/data/flipbooks"
@@ -79,10 +80,23 @@ def write_manifest(slug: str, manifest: dict[str, Any]) -> Path:
     return path
 
 
+def get_pdf_page_count(pdf_path: Path) -> int:
+    try:
+        reader = PdfReader(str(pdf_path))
+        page_count = len(reader.pages)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Upload must be a readable PDF file.") from exc
+
+    if page_count < 1:
+        raise HTTPException(status_code=400, detail="PDF must contain at least one page.")
+
+    return page_count
+
+
 app = FastAPI(
     title=APP_NAME,
     description="Minimal Render-deployable API for the GBM Flipbook service.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 
@@ -129,6 +143,7 @@ def read_book(slug: str) -> dict[str, Any]:
         "slug": normalized_slug,
         "status": manifest["status"],
         "title": manifest["title"],
+        "page_count": manifest["page_count"],
         "manifest_url": f"/api/publications/{normalized_slug}/manifest",
         "message": "Flipbook viewer will be implemented in a future phase.",
     }
@@ -159,6 +174,7 @@ def upload_publication_pdf(
     with pdf_path.open("wb") as output_file:
         shutil.copyfileobj(file.file, output_file)
 
+    page_count = get_pdf_page_count(pdf_path)
     now = datetime.now(timezone.utc).isoformat()
     manifest = {
         "slug": normalized_slug,
@@ -166,7 +182,7 @@ def upload_publication_pdf(
         "description": description or "",
         "status": "uploaded",
         "original_pdf_path": str(pdf_path),
-        "page_count": None,
+        "page_count": page_count,
         "created_at": now,
         "updated_at": now,
         "viewer_settings": {},
@@ -176,6 +192,7 @@ def upload_publication_pdf(
     return {
         "status": "uploaded",
         "slug": normalized_slug,
+        "page_count": page_count,
         "manifest_url": f"/api/publications/{normalized_slug}/manifest",
         "manifest_path": str(manifest_file_path),
         "pdf_path": str(pdf_path),
