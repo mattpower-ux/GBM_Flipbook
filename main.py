@@ -6,16 +6,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pymupdf
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pypdf import PdfReader
 
 APP_NAME = "GBM Flipbook"
 DEFAULT_STORAGE_PATH = "/data/flipbooks"
 FALLBACK_STORAGE_PATH = "/tmp/flipbooks"
+PAGE_RENDER_SCALE = 2.0
+THUMB_RENDER_SCALE = 0.35
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+ASSET_FILENAME_PATTERN = re.compile(r"^page-[0-9]{3,5}\.jpg$")
 
 active_storage_path: Path | None = None
 storage_warning: str | None = None
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def get_storage_path() -> Path:
@@ -93,10 +102,68 @@ def get_pdf_page_count(pdf_path: Path) -> int:
     return page_count
 
 
+def reset_directory(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Original PDF not found.")
+
+    destination_dir = publication_dir(slug)
+    pages_dir = destination_dir / "pages"
+    thumbs_dir = destination_dir / "thumbs"
+    reset_directory(pages_dir)
+    reset_directory(thumbs_dir)
+
+    try:
+        document = pymupdf.open(str(pdf_path))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Original PDF could not be opened for processing.") from exc
+
+    page_assets = []
+    with document:
+        for page_index in range(document.page_count):
+            page_number = page_index + 1
+            filename = f"page-{page_number:03d}.jpg"
+            page = document.load_page(page_index)
+
+            page_pixmap = page.get_pixmap(
+                matrix=pymupdf.Matrix(PAGE_RENDER_SCALE, PAGE_RENDER_SCALE),
+                colorspace=pymupdf.csRGB,
+                alpha=False,
+            )
+            thumb_pixmap = page.get_pixmap(
+                matrix=pymupdf.Matrix(THUMB_RENDER_SCALE, THUMB_RENDER_SCALE),
+                colorspace=pymupdf.csRGB,
+                alpha=False,
+            )
+
+            page_pixmap.save(str(pages_dir / filename))
+            thumb_pixmap.save(str(thumbs_dir / filename))
+
+            page_assets.append(
+                {
+                    "page_number": page_number,
+                    "image_url": f"/api/publications/{slug}/assets/pages/{filename}",
+                    "thumb_url": f"/api/publications/{slug}/assets/thumbs/{filename}",
+                }
+            )
+
+    return {
+        "page_count": len(page_assets),
+        "pages": page_assets,
+        "pages_path": str(pages_dir),
+        "thumbs_path": str(thumbs_dir),
+    }
+
+
 app = FastAPI(
     title=APP_NAME,
     description="Minimal Render-deployable API for the GBM Flipbook service.",
-    version="0.3.0",
+    version="0.4.0",
 )
 
 
@@ -154,6 +221,21 @@ def get_publication_manifest(slug: str) -> dict[str, Any]:
     return read_manifest(slug)
 
 
+@app.get("/api/publications/{slug}/assets/{asset_type}/{filename}")
+def get_publication_asset(slug: str, asset_type: str, filename: str) -> FileResponse:
+    normalized_slug = validate_slug(slug)
+    if asset_type not in {"pages", "thumbs"}:
+        raise HTTPException(status_code=404, detail="Asset type not found.")
+    if not ASSET_FILENAME_PATTERN.fullmatch(filename):
+        raise HTTPException(status_code=400, detail="Invalid asset filename.")
+
+    asset_path = publication_dir(normalized_slug) / asset_type / filename
+    if not asset_path.exists():
+        raise HTTPException(status_code=404, detail="Asset not found.")
+
+    return FileResponse(asset_path, media_type="image/jpeg")
+
+
 @app.post("/api/publications/{slug}/upload")
 def upload_publication_pdf(
     slug: str,
@@ -175,7 +257,7 @@ def upload_publication_pdf(
         shutil.copyfileobj(file.file, output_file)
 
     page_count = get_pdf_page_count(pdf_path)
-    now = datetime.now(timezone.utc).isoformat()
+    timestamp = now_iso()
     manifest = {
         "slug": normalized_slug,
         "title": title or normalized_slug.replace("-", " ").title(),
@@ -183,8 +265,10 @@ def upload_publication_pdf(
         "status": "uploaded",
         "original_pdf_path": str(pdf_path),
         "page_count": page_count,
-        "created_at": now,
-        "updated_at": now,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "processed_at": None,
+        "pages": [],
         "viewer_settings": {},
     }
     manifest_file_path = write_manifest(normalized_slug, manifest)
@@ -196,4 +280,40 @@ def upload_publication_pdf(
         "manifest_url": f"/api/publications/{normalized_slug}/manifest",
         "manifest_path": str(manifest_file_path),
         "pdf_path": str(pdf_path),
+    }
+
+
+@app.post("/api/publications/{slug}/process")
+def process_publication_pdf(slug: str) -> dict[str, Any]:
+    normalized_slug = validate_slug(slug)
+    manifest = read_manifest(normalized_slug)
+    pdf_path = Path(manifest["original_pdf_path"])
+
+    manifest["status"] = "processing"
+    manifest["updated_at"] = now_iso()
+    write_manifest(normalized_slug, manifest)
+
+    try:
+        rendered_assets = render_pdf_assets(normalized_slug, pdf_path)
+    except HTTPException as exc:
+        manifest["status"] = "error"
+        manifest["error"] = exc.detail
+        manifest["updated_at"] = now_iso()
+        write_manifest(normalized_slug, manifest)
+        raise
+
+    manifest.update(rendered_assets)
+    manifest["status"] = "processed"
+    manifest["processed_at"] = now_iso()
+    manifest["updated_at"] = manifest["processed_at"]
+    manifest.pop("error", None)
+    manifest_file_path = write_manifest(normalized_slug, manifest)
+
+    return {
+        "status": "processed",
+        "slug": normalized_slug,
+        "page_count": manifest["page_count"],
+        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
+        "manifest_path": str(manifest_file_path),
+        "first_page_url": manifest["pages"][0]["image_url"] if manifest["pages"] else None,
     }
