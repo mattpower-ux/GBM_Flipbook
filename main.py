@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -8,8 +9,9 @@ from typing import Any
 
 import pymupdf
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pypdf import PdfReader
+from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, NumberObject
 
 APP_NAME = "GBM Flipbook"
 DEFAULT_STORAGE_PATH = "/data/flipbooks"
@@ -108,6 +110,136 @@ def reset_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def get_pdf_object(value: Any) -> Any:
+    if isinstance(value, IndirectObject):
+        return value.get_object()
+    return value
+
+
+def get_pdf_link_destination(annotation: DictionaryObject) -> Any:
+    if "/Dest" in annotation:
+        return annotation["/Dest"]
+
+    action = get_pdf_object(annotation.get("/A"))
+    if isinstance(action, DictionaryObject):
+        if action.get("/S") == "/GoTo" and "/D" in action:
+            return action["/D"]
+        if action.get("/S") == "/URI" and "/URI" in action:
+            return {"uri": str(action["/URI"])}
+
+    return None
+
+
+def page_object_number(page: Any) -> int | None:
+    indirect_reference = getattr(page, "indirect_reference", None)
+    if indirect_reference is None:
+        indirect_reference = getattr(page, "indirectRef", None)
+    return getattr(indirect_reference, "idnum", None)
+
+
+def resolve_link_page_number(destination: Any, page_object_numbers: dict[int, int], total_pages: int) -> int | None:
+    if isinstance(destination, dict) and "uri" in destination:
+        return None
+
+    if isinstance(destination, ArrayObject) and destination:
+        destination = destination[0]
+
+    destination = get_pdf_object(destination)
+
+    if isinstance(destination, NumberObject) or isinstance(destination, int):
+        target_page = int(destination) + 1
+        if 1 <= target_page <= total_pages:
+            return target_page
+        return None
+
+    object_number = page_object_number(destination)
+    if object_number is not None:
+        return page_object_numbers.get(object_number)
+
+    return None
+
+
+def normalize_pdf_rect(rect: Any, page_width: float, page_height: float) -> dict[str, float] | None:
+    if not rect or len(rect) != 4:
+        return None
+
+    x0, y0, x1, y1 = [float(value) for value in rect]
+    left = min(x0, x1)
+    right = max(x0, x1)
+    bottom = min(y0, y1)
+    top = max(y0, y1)
+
+    return {
+        "x": max(0.0, min(1.0, left / page_width)),
+        "y": max(0.0, min(1.0, (page_height - top) / page_height)),
+        "width": max(0.0, min(1.0, (right - left) / page_width)),
+        "height": max(0.0, min(1.0, (top - bottom) / page_height)),
+    }
+
+
+def extract_pdf_links(pdf_path: Path, total_pages: int) -> list[dict[str, Any]]:
+    try:
+        reader = PdfReader(str(pdf_path))
+    except Exception:
+        return []
+
+    page_object_numbers = {
+        object_number: page_index + 1
+        for page_index, page in enumerate(reader.pages)
+        if (object_number := page_object_number(page)) is not None
+    }
+    links: list[dict[str, Any]] = []
+
+    for page_index, page in enumerate(reader.pages):
+        annotations = page.get("/Annots") or []
+        page_width = float(page.mediabox.width)
+        page_height = float(page.mediabox.height)
+
+        for annotation_reference in annotations:
+            annotation = get_pdf_object(annotation_reference)
+            if not isinstance(annotation, DictionaryObject) or annotation.get("/Subtype") != "/Link":
+                continue
+
+            source_rect = normalize_pdf_rect(annotation.get("/Rect"), page_width, page_height)
+            if source_rect is None or source_rect["width"] <= 0 or source_rect["height"] <= 0:
+                continue
+
+            destination = get_pdf_link_destination(annotation)
+            uri = destination.get("uri") if isinstance(destination, dict) else None
+            target_page_number = resolve_link_page_number(destination, page_object_numbers, total_pages)
+
+            if not uri and target_page_number is None:
+                continue
+
+            link: dict[str, Any] = {
+                "source_page_number": page_index + 1,
+                "source_rect": source_rect,
+            }
+            if target_page_number is not None:
+                link["target_page_number"] = target_page_number
+            if uri:
+                link["uri"] = uri
+            links.append(link)
+
+    return links
+
+
+def detect_toc_page_number(links: list[dict[str, Any]]) -> int | None:
+    internal_link_counts: dict[int, int] = {}
+    for link in links:
+        if "target_page_number" in link:
+            page_number = int(link["source_page_number"])
+            internal_link_counts[page_number] = internal_link_counts.get(page_number, 0) + 1
+
+    if not internal_link_counts:
+        return None
+
+    toc_page_number, link_count = max(internal_link_counts.items(), key=lambda item: item[1])
+    if toc_page_number <= 20 and link_count >= 5:
+        return toc_page_number
+    return None
+
+
 def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="Original PDF not found.")
@@ -160,11 +292,49 @@ def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
     }
 
 
-app = FastAPI(
-    title=APP_NAME,
-    description="Minimal Render-deployable API for the GBM Flipbook service.",
-    version="0.4.0",
-)
+def render_missing_book(slug: str) -> HTMLResponse:
+    safe_slug = html.escape(slug)
+    return HTMLResponse(
+        content=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>GBM Flipbook</title><style>body{{margin:0;font-family:Arial,sans-serif;background:#f3f6f4;color:#17211d}}main{{min-height:100vh;display:grid;place-items:center;padding:24px}}section{{max-width:620px}}h1{{margin:0 0 12px;font-size:34px;line-height:1.1}}p{{margin:0;color:#4c5d56;font-size:16px;line-height:1.5}}code{{color:#0f6d4f}}</style></head><body><main><section><h1>GBM Flipbook</h1><p>No publication manifest exists for <code>{safe_slug}</code>.</p></section></main></body></html>""",
+        status_code=404,
+    )
+
+
+def render_book_viewer(manifest: dict[str, Any]) -> HTMLResponse:
+    title = html.escape(str(manifest.get("title") or "GBM Flipbook"))
+    description = html.escape(str(manifest.get("description") or ""))
+    slug = html.escape(str(manifest.get("slug") or ""))
+    status = html.escape(str(manifest.get("status") or "unknown"))
+    manifest_json = html.escape(json.dumps(manifest), quote=False)
+    template = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root{color-scheme:light;--bg:#e8eee9;--panel:#fff;--ink:#16211d;--muted:#5f6f68;--line:#cfd9d3;--brand:#0d6b4d;--brand-dark:#094935;--link:#d8b24c}*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--ink)}button,a.button{min-height:38px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:0 12px;font:inherit;font-weight:700;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px}button:hover,a.button:hover,button:focus-visible,a.button:focus-visible{border-color:var(--brand);outline:2px solid transparent}button:disabled{cursor:not-allowed;opacity:.42}.app{min-height:100vh;display:grid;grid-template-rows:auto 1fr}header{background:var(--panel);border-bottom:1px solid var(--line);padding:12px 16px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;position:sticky;top:0;z-index:10}.title-block{min-width:0}h1{margin:0;font-size:18px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{margin-top:4px;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.toolbar{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;align-items:center}.counter{color:var(--muted);font-size:14px;min-width:86px;text-align:center}.layout{min-height:0;display:grid;grid-template-columns:138px minmax(0,1fr)}aside{border-right:1px solid var(--line);background:#f8faf8;overflow:auto;padding:10px}.thumbs{display:grid;gap:10px}.thumb{width:100%;border:2px solid transparent;border-radius:6px;padding:4px;background:transparent;height:auto;display:grid;gap:4px;color:var(--muted);font-size:12px;font-weight:700}.thumb[aria-current=true]{border-color:var(--brand);background:#e6f3ee;color:var(--brand-dark)}.thumb img{width:100%;aspect-ratio:648/783;object-fit:cover;display:block;border-radius:3px;background:#d8dfdc}.stage-wrap{min-width:0;min-height:0;overflow:auto;padding:22px}.stage{min-height:100%;display:flex;align-items:flex-start;justify-content:center}.page-frame{position:relative;width:min(100%,calc(760px * var(--zoom,1)));max-width:none;filter:drop-shadow(0 18px 28px rgba(20,35,29,.18))}.page-frame img{width:100%;display:block;background:#fff}.pdf-hotspot{position:absolute;border:2px solid transparent;background:rgba(216,178,76,.01);border-radius:3px;cursor:pointer;padding:0}.pdf-hotspot:hover,.pdf-hotspot:focus-visible{border-color:var(--link);background:rgba(216,178,76,.22);outline:0}.empty{max-width:680px;margin:18vh auto 0;color:var(--muted);line-height:1.5}@media(max-width:760px){header{grid-template-columns:1fr;gap:10px}.toolbar{justify-content:flex-start;overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px}.layout{grid-template-columns:1fr;grid-template-rows:1fr auto}aside{grid-row:2;border-right:0;border-top:1px solid var(--line);padding:8px}.thumbs{grid-auto-flow:column;grid-auto-columns:76px;overflow-x:auto;gap:8px}.stage-wrap{padding:12px}.page-frame{width:min(100%,calc(560px * var(--zoom,1)))}}
+</style>
+</head>
+<body>
+<div class="app"><header><div class="title-block"><h1>__TITLE__</h1><div class="meta"><span>__DESCRIPTION__</span><span id="status"> __STATUS__</span></div></div><nav class="toolbar" aria-label="Reader controls"><button type="button" id="prevBtn" title="Previous page">Prev</button><span class="counter" id="pageCounter">Page 0 / 0</span><button type="button" id="nextBtn" title="Next page">Next</button><button type="button" id="zoomOutBtn" title="Zoom out">-</button><button type="button" id="zoomInBtn" title="Zoom in">+</button><button type="button" id="tocBtn" title="Table of contents">TOC</button><button type="button" id="fullscreenBtn" title="Fullscreen">Full</button><button type="button" id="shareBtn" title="Copy link">Share</button><a class="button" href="/api/publications/__SLUG__/original.pdf" title="Download PDF">PDF</a></nav></header><div class="layout"><aside aria-label="Thumbnails"><div class="thumbs" id="thumbs"></div></aside><main class="stage-wrap" id="stageWrap"><div class="stage" id="stage"></div></main></div></div>
+<script type="application/json" id="manifest-data">__MANIFEST__</script>
+<script>
+const manifest=JSON.parse(document.getElementById('manifest-data').textContent);const pages=Array.isArray(manifest.pages)?manifest.pages:[];const links=Array.isArray(manifest.links)?manifest.links:[];const linksByPage=links.reduce((acc,link)=>{const page=String(link.source_page_number);(acc[page]||(acc[page]=[])).push(link);return acc},{});const stage=document.getElementById('stage');const thumbs=document.getElementById('thumbs');const counter=document.getElementById('pageCounter');const prevBtn=document.getElementById('prevBtn');const nextBtn=document.getElementById('nextBtn');const zoomInBtn=document.getElementById('zoomInBtn');const zoomOutBtn=document.getElementById('zoomOutBtn');const fullscreenBtn=document.getElementById('fullscreenBtn');const shareBtn=document.getElementById('shareBtn');const tocBtn=document.getElementById('tocBtn');const stageWrap=document.getElementById('stageWrap');let pageIndex=0;let zoom=1;function pageUrl(path){return new URL(path,window.location.origin).toString()}function syncHash(){const pageNumber=pageIndex+1;if(window.location.hash!=='#page-'+pageNumber)history.replaceState(null,'','#page-'+pageNumber)}function addPdfLinks(frame,pageNumber){(linksByPage[String(pageNumber)]||[]).forEach((link)=>{const rect=link.source_rect;if(!rect)return;const button=document.createElement('button');button.type='button';button.className='pdf-hotspot';button.title=link.uri?'Open link':'Go to page '+link.target_page_number;button.setAttribute('aria-label',button.title);button.style.left=(rect.x*100)+'%';button.style.top=(rect.y*100)+'%';button.style.width=(rect.width*100)+'%';button.style.height=(rect.height*100)+'%';button.addEventListener('click',()=>{if(link.uri)window.open(link.uri,'_blank','noopener,noreferrer');else if(link.target_page_number)showPage(Number(link.target_page_number)-1)});frame.append(button)})}function showPage(index){if(!pages.length){stage.innerHTML='<p class="empty">This publication has no rendered pages yet.</p>';counter.textContent='Page 0 / 0';prevBtn.disabled=true;nextBtn.disabled=true;return}pageIndex=Math.max(0,Math.min(index,pages.length-1));const page=pages[pageIndex];stage.innerHTML='';const frame=document.createElement('div');frame.className='page-frame';frame.style.setProperty('--zoom',String(zoom));const img=document.createElement('img');img.src=pageUrl(page.image_url);img.alt=manifest.title+', page '+page.page_number;frame.append(img);addPdfLinks(frame,Number(page.page_number));stage.append(frame);counter.textContent='Page '+page.page_number+' / '+pages.length;prevBtn.disabled=pageIndex===0;nextBtn.disabled=pageIndex===pages.length-1;document.querySelectorAll('.thumb').forEach((thumb)=>thumb.setAttribute('aria-current',thumb.dataset.index===String(pageIndex)?'true':'false'));stageWrap.scrollTo({top:0,behavior:'smooth'});syncHash()}function setZoom(nextZoom){zoom=Math.max(.7,Math.min(nextZoom,2.4));const frame=document.querySelector('.page-frame');if(frame)frame.style.setProperty('--zoom',String(zoom))}function renderThumbs(){thumbs.innerHTML='';pages.forEach((page,index)=>{const button=document.createElement('button');button.type='button';button.className='thumb';button.setAttribute('aria-label','Page '+page.page_number);button.dataset.index=String(index);const img=document.createElement('img');img.src=pageUrl(page.thumb_url);img.alt='';img.loading='lazy';const label=document.createElement('span');label.textContent=String(page.page_number);button.append(img,label);button.addEventListener('click',()=>showPage(index));thumbs.append(button)})}prevBtn.addEventListener('click',()=>showPage(pageIndex-1));nextBtn.addEventListener('click',()=>showPage(pageIndex+1));zoomInBtn.addEventListener('click',()=>setZoom(zoom+.15));zoomOutBtn.addEventListener('click',()=>setZoom(zoom-.15));tocBtn.addEventListener('click',()=>{if(manifest.toc_page_number)showPage(Number(manifest.toc_page_number)-1)});fullscreenBtn.addEventListener('click',()=>{if(!document.fullscreenElement)document.documentElement.requestFullscreen?.();else document.exitFullscreen?.()});shareBtn.addEventListener('click',async()=>{syncHash();await navigator.clipboard?.writeText(window.location.href);shareBtn.textContent='Copied';window.setTimeout(()=>shareBtn.textContent='Share',1200)});document.addEventListener('keydown',(event)=>{if(event.key==='ArrowLeft')showPage(pageIndex-1);if(event.key==='ArrowRight')showPage(pageIndex+1)});window.addEventListener('hashchange',()=>{const match=window.location.hash.match(/^#page-(\d+)$/);if(match)showPage(Number(match[1])-1)});const initialMatch=window.location.hash.match(/^#page-(\d+)$/);if(initialMatch)pageIndex=Number(initialMatch[1])-1;renderThumbs();showPage(pageIndex);
+</script>
+</body>
+</html>"""
+    return HTMLResponse(
+        content=template
+        .replace("__TITLE__", title)
+        .replace("__DESCRIPTION__", description)
+        .replace("__STATUS__", status)
+        .replace("__SLUG__", slug)
+        .replace("__MANIFEST__", manifest_json)
+    )
+
+
+app = FastAPI(title=APP_NAME, description="Minimal Render-deployable API for the GBM Flipbook service.", version="0.5.0")
 
 
 @app.on_event("startup")
@@ -174,51 +344,43 @@ def startup() -> None:
 
 @app.get("/")
 def read_root() -> dict[str, str]:
-    return {
-        "app": APP_NAME,
-        "message": "GBM Flipbook service is running.",
-    }
+    return {"app": APP_NAME, "message": "GBM Flipbook service is running."}
 
 
 @app.get("/health")
 def health_check() -> dict[str, str]:
     storage_path = active_storage_path or ensure_storage_path()
-    response = {
-        "status": "ok",
-        "storage_path": str(storage_path),
-    }
+    response = {"status": "ok", "storage_path": str(storage_path)}
     if storage_warning:
         response["storage_warning"] = storage_warning
     return response
 
 
-@app.get("/book/{slug}")
-def read_book(slug: str) -> dict[str, Any]:
+@app.get("/book/{slug}", response_class=HTMLResponse)
+def read_book(slug: str) -> HTMLResponse:
     normalized_slug = validate_slug(slug)
     try:
         manifest = read_manifest(normalized_slug)
     except HTTPException as exc:
         if exc.status_code != 404:
             raise
-        return {
-            "slug": normalized_slug,
-            "status": "placeholder",
-            "message": "Upload a PDF for this slug to create the first flipbook manifest.",
-        }
-
-    return {
-        "slug": normalized_slug,
-        "status": manifest["status"],
-        "title": manifest["title"],
-        "page_count": manifest["page_count"],
-        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
-        "message": "Flipbook viewer will be implemented in a future phase.",
-    }
+        return render_missing_book(normalized_slug)
+    return render_book_viewer(manifest)
 
 
 @app.get("/api/publications/{slug}/manifest")
 def get_publication_manifest(slug: str) -> dict[str, Any]:
     return read_manifest(slug)
+
+
+@app.get("/api/publications/{slug}/original.pdf")
+def get_publication_pdf(slug: str) -> FileResponse:
+    normalized_slug = validate_slug(slug)
+    manifest = read_manifest(normalized_slug)
+    pdf_path = Path(manifest["original_pdf_path"])
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Original PDF not found.")
+    return FileResponse(pdf_path, media_type="application/pdf", filename=f"{normalized_slug}.pdf")
 
 
 @app.get("/api/publications/{slug}/assets/{asset_type}/{filename}")
@@ -228,11 +390,9 @@ def get_publication_asset(slug: str, asset_type: str, filename: str) -> FileResp
         raise HTTPException(status_code=404, detail="Asset type not found.")
     if not ASSET_FILENAME_PATTERN.fullmatch(filename):
         raise HTTPException(status_code=400, detail="Invalid asset filename.")
-
     asset_path = publication_dir(normalized_slug) / asset_type / filename
     if not asset_path.exists():
         raise HTTPException(status_code=404, detail="Asset not found.")
-
     return FileResponse(asset_path, media_type="image/jpeg")
 
 
@@ -245,18 +405,15 @@ def upload_publication_pdf(
 ) -> dict[str, Any]:
     normalized_slug = validate_slug(slug)
     filename = file.filename or ""
-
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Upload must be a PDF file.")
-
     destination_dir = publication_dir(normalized_slug)
     destination_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = destination_dir / "original.pdf"
-
     with pdf_path.open("wb") as output_file:
         shutil.copyfileobj(file.file, output_file)
-
     page_count = get_pdf_page_count(pdf_path)
+    pdf_links = extract_pdf_links(pdf_path, page_count)
     timestamp = now_iso()
     manifest = {
         "slug": normalized_slug,
@@ -268,19 +425,13 @@ def upload_publication_pdf(
         "created_at": timestamp,
         "updated_at": timestamp,
         "processed_at": None,
+        "toc_page_number": detect_toc_page_number(pdf_links),
+        "links": pdf_links,
         "pages": [],
         "viewer_settings": {},
     }
     manifest_file_path = write_manifest(normalized_slug, manifest)
-
-    return {
-        "status": "uploaded",
-        "slug": normalized_slug,
-        "page_count": page_count,
-        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
-        "manifest_path": str(manifest_file_path),
-        "pdf_path": str(pdf_path),
-    }
+    return {"status": "uploaded", "slug": normalized_slug, "page_count": page_count, "link_count": len(pdf_links), "manifest_url": f"/api/publications/{normalized_slug}/manifest", "manifest_path": str(manifest_file_path), "pdf_path": str(pdf_path)}
 
 
 @app.post("/api/publications/{slug}/process")
@@ -288,11 +439,9 @@ def process_publication_pdf(slug: str) -> dict[str, Any]:
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
     pdf_path = Path(manifest["original_pdf_path"])
-
     manifest["status"] = "processing"
     manifest["updated_at"] = now_iso()
     write_manifest(normalized_slug, manifest)
-
     try:
         rendered_assets = render_pdf_assets(normalized_slug, pdf_path)
     except HTTPException as exc:
@@ -301,18 +450,21 @@ def process_publication_pdf(slug: str) -> dict[str, Any]:
         manifest["updated_at"] = now_iso()
         write_manifest(normalized_slug, manifest)
         raise
-
+    pdf_links = extract_pdf_links(pdf_path, rendered_assets["page_count"])
     manifest.update(rendered_assets)
+    manifest["links"] = pdf_links
+    manifest["toc_page_number"] = detect_toc_page_number(pdf_links)
     manifest["status"] = "processed"
     manifest["processed_at"] = now_iso()
     manifest["updated_at"] = manifest["processed_at"]
     manifest.pop("error", None)
     manifest_file_path = write_manifest(normalized_slug, manifest)
-
     return {
         "status": "processed",
         "slug": normalized_slug,
         "page_count": manifest["page_count"],
+        "link_count": len(pdf_links),
+        "toc_page_number": manifest["toc_page_number"],
         "manifest_url": f"/api/publications/{normalized_slug}/manifest",
         "manifest_path": str(manifest_file_path),
         "first_page_url": manifest["pages"][0]["image_url"] if manifest["pages"] else None,
