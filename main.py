@@ -267,14 +267,17 @@ def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
                 colorspace=pymupdf.csRGB,
                 alpha=False,
             )
+            page_pixmap.save(str(pages_dir / filename))
+            del page_pixmap
+
             thumb_pixmap = page.get_pixmap(
                 matrix=pymupdf.Matrix(THUMB_RENDER_SCALE, THUMB_RENDER_SCALE),
                 colorspace=pymupdf.csRGB,
                 alpha=False,
             )
-
-            page_pixmap.save(str(pages_dir / filename))
             thumb_pixmap.save(str(thumbs_dir / filename))
+            del thumb_pixmap
+            del page
 
             page_assets.append(
                 {
@@ -290,6 +293,26 @@ def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
         "pages_path": str(pages_dir),
         "thumbs_path": str(thumbs_dir),
     }
+
+
+def refresh_embedded_links(slug: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    pdf_path = Path(manifest["original_pdf_path"])
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Original PDF not found.")
+
+    page_count = int(manifest.get("page_count") or get_pdf_page_count(pdf_path))
+    pdf_links = extract_pdf_links(pdf_path, page_count)
+    manifest["page_count"] = page_count
+    manifest["links"] = pdf_links
+    manifest["toc_page_number"] = detect_toc_page_number(pdf_links)
+    manifest["updated_at"] = now_iso()
+
+    if manifest.get("pages") and manifest.get("status") in {"processing", "uploaded", "error"}:
+        manifest["status"] = "processed"
+        manifest["processed_at"] = manifest.get("processed_at") or manifest["updated_at"]
+        manifest.pop("error", None)
+
+    return manifest
 
 
 def render_missing_book(slug: str) -> HTMLResponse:
@@ -334,7 +357,7 @@ const manifest=JSON.parse(document.getElementById('manifest-data').textContent);
     )
 
 
-app = FastAPI(title=APP_NAME, description="Minimal Render-deployable API for the GBM Flipbook service.", version="0.5.0")
+app = FastAPI(title=APP_NAME, description="Minimal Render-deployable API for the GBM Flipbook service.", version="0.6.0")
 
 
 @app.on_event("startup")
@@ -371,6 +394,23 @@ def read_book(slug: str) -> HTMLResponse:
 @app.get("/api/publications/{slug}/manifest")
 def get_publication_manifest(slug: str) -> dict[str, Any]:
     return read_manifest(slug)
+
+
+@app.post("/api/publications/{slug}/refresh-links")
+def refresh_publication_links(slug: str) -> dict[str, Any]:
+    normalized_slug = validate_slug(slug)
+    manifest = refresh_embedded_links(normalized_slug, read_manifest(normalized_slug))
+    manifest_file_path = write_manifest(normalized_slug, manifest)
+    return {
+        "status": manifest["status"],
+        "slug": normalized_slug,
+        "page_count": manifest["page_count"],
+        "page_assets": len(manifest.get("pages") or []),
+        "link_count": len(manifest.get("links") or []),
+        "toc_page_number": manifest.get("toc_page_number"),
+        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
+        "manifest_path": str(manifest_file_path),
+    }
 
 
 @app.get("/api/publications/{slug}/original.pdf")
@@ -439,6 +479,7 @@ def process_publication_pdf(slug: str) -> dict[str, Any]:
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
     pdf_path = Path(manifest["original_pdf_path"])
+    manifest = refresh_embedded_links(normalized_slug, manifest)
     manifest["status"] = "processing"
     manifest["updated_at"] = now_iso()
     write_manifest(normalized_slug, manifest)
