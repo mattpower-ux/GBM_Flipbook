@@ -582,7 +582,6 @@ def upload_publication_pdf(
     with pdf_path.open("wb") as output_file:
         shutil.copyfileobj(file.file, output_file)
     page_count = get_pdf_page_count(pdf_path)
-    pdf_links = extract_pdf_links(pdf_path, page_count)
     timestamp = now_iso()
     manifest = {
         "slug": normalized_slug,
@@ -596,13 +595,13 @@ def upload_publication_pdf(
         "created_at": timestamp,
         "updated_at": timestamp,
         "processed_at": None,
-        "toc_page_number": detect_toc_page_number(pdf_links),
-        "links": pdf_links,
+        "toc_page_number": None,
+        "links": [],
         "pages": [],
         "viewer_settings": {},
     }
     manifest_file_path = write_manifest(normalized_slug, manifest)
-    return {"status": "uploaded", "slug": normalized_slug, "page_count": page_count, "link_count": len(pdf_links), "manifest_url": f"/api/publications/{normalized_slug}/manifest", "manifest_path": str(manifest_file_path), "pdf_path": str(pdf_path)}
+    return {"status": "uploaded", "slug": normalized_slug, "page_count": page_count, "link_count": 0, "manifest_url": f"/api/publications/{normalized_slug}/manifest", "manifest_path": str(manifest_file_path), "pdf_path": str(pdf_path)}
 
 
 @app.post("/api/publications/{slug}/process-batch")
@@ -614,7 +613,8 @@ def process_publication_pdf_batch(
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
     pdf_path = Path(manifest["original_pdf_path"])
-    manifest = refresh_embedded_links(normalized_slug, manifest)
+    if not manifest.get("links"):
+        manifest = refresh_embedded_links(normalized_slug, manifest)
     rendered_batch = render_pdf_page_range(normalized_slug, pdf_path, start_page=start_page, limit=limit)
     manifest["page_count"] = rendered_batch["page_count"]
     manifest["pages"] = merge_page_assets(manifest.get("pages") or [], rendered_batch["rendered_pages"])
