@@ -2,6 +2,7 @@ import html
 import json
 import os
 import re
+import secrets
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,8 @@ PAGE_RENDER_SCALE = 2.0
 THUMB_RENDER_SCALE = 0.35
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ASSET_FILENAME_PATTERN = re.compile(r"^page-[0-9]{3,5}\.jpg$")
+VALID_FLIPBOOK_TYPES = {"magazine": "Magazine", "ebook": "Ebook", "other": "Other"}
+ADMIN_TOKEN_ENV = "FLIPBOOK_ADMIN_TOKEN"
 
 active_storage_path: Path | None = None
 storage_warning: str | None = None
@@ -62,6 +65,52 @@ def validate_slug(slug: str) -> str:
             detail="Slug must use lowercase letters, numbers, and single hyphens only.",
         )
     return normalized_slug
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    if not slug:
+        raise HTTPException(status_code=400, detail="A usable title or PDF filename is required.")
+    return validate_slug(slug)
+
+
+def unique_slug(base_slug: str) -> str:
+    normalized_base = validate_slug(base_slug)
+    candidate = normalized_base
+    suffix = 2
+    while manifest_path(candidate).exists():
+        candidate = f"{normalized_base}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def normalize_flipbook_type(value: str | None) -> str:
+    normalized_value = str(value or "magazine").strip().lower()
+    if normalized_value not in VALID_FLIPBOOK_TYPES:
+        raise HTTPException(status_code=400, detail="Flipbook type must be Magazine, Ebook, or Other.")
+    return normalized_value
+
+
+def flipbook_type_label(value: str | None) -> str:
+    return VALID_FLIPBOOK_TYPES[normalize_flipbook_type(value)]
+
+
+def get_admin_token() -> str:
+    token = os.getenv(ADMIN_TOKEN_ENV, "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Set {ADMIN_TOKEN_ENV} in Render before using Flipbook Admin.",
+        )
+    return token
+
+
+def require_admin_token(admin_token: str | None) -> None:
+    expected_token = get_admin_token()
+    provided_token = str(admin_token or "")
+    if not secrets.compare_digest(provided_token, expected_token):
+        raise HTTPException(status_code=401, detail="Admin access required.")
 
 
 def publication_dir(slug: str) -> Path:
@@ -372,6 +421,68 @@ def merge_page_assets(existing_pages: list[Any], rendered_pages: list[dict[str, 
     return [pages_by_number[page_number] for page_number in sorted(pages_by_number)]
 
 
+def save_publication_upload(
+    *,
+    slug: str,
+    file: UploadFile,
+    title: str | None = None,
+    description: str | None = None,
+    publication_date: str | None = None,
+    source_url: str | None = None,
+    flipbook_type: str | None = None,
+    upload_date: str | None = None,
+    version_notes: str | None = None,
+) -> dict[str, Any]:
+    normalized_slug = validate_slug(slug)
+    filename = file.filename or ""
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Upload must be a PDF file.")
+
+    destination_dir = publication_dir(normalized_slug)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    for asset_dir_name in ("pages", "thumbs"):
+        asset_dir = destination_dir / asset_dir_name
+        if asset_dir.exists():
+            shutil.rmtree(asset_dir)
+
+    pdf_path = destination_dir / "original.pdf"
+    with pdf_path.open("wb") as output_file:
+        shutil.copyfileobj(file.file, output_file)
+
+    page_count = get_pdf_page_count(pdf_path)
+    timestamp = now_iso()
+    manifest = {
+        "slug": normalized_slug,
+        "title": title or normalized_slug.replace("-", " ").title(),
+        "description": description or "",
+        "status": "uploaded",
+        "original_pdf_path": str(pdf_path),
+        "page_count": page_count,
+        "publication_date": publication_date or upload_date or "",
+        "upload_date": upload_date or timestamp[:10],
+        "version_notes": version_notes or "",
+        "source_url": source_url or "",
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "processed_at": None,
+        "toc_page_number": None,
+        "flipbook_type": normalize_flipbook_type(flipbook_type),
+        "links": [],
+        "pages": [],
+        "viewer_settings": {},
+    }
+    manifest_file_path = write_manifest(normalized_slug, manifest)
+    return {
+        "status": "uploaded",
+        "slug": normalized_slug,
+        "page_count": page_count,
+        "link_count": 0,
+        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
+        "manifest_path": str(manifest_file_path),
+        "pdf_path": str(pdf_path),
+    }
+
+
 def publication_date(manifest: dict[str, Any]) -> str:
     for key in ("publication_date", "published_at", "issue_date", "created_at"):
         value = str(manifest.get(key) or "").strip()
@@ -386,6 +497,7 @@ def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
     cover_url = ""
     if pages and isinstance(pages[0], dict):
         cover_url = str(pages[0].get("thumb_url") or pages[0].get("image_url") or "")
+    flipbook_type = normalize_flipbook_type(str(manifest.get("flipbook_type") or "magazine"))
     return {
         "slug": slug,
         "title": str(manifest.get("title") or slug.replace("-", " ").title()),
@@ -393,6 +505,10 @@ def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
         "date": publication_date(manifest),
         "cover_url": cover_url,
         "status": str(manifest.get("status") or "unknown"),
+        "flipbook_type": flipbook_type,
+        "flipbook_type_label": VALID_FLIPBOOK_TYPES[flipbook_type],
+        "upload_date": str(manifest.get("upload_date") or "")[:10],
+        "version_notes": str(manifest.get("version_notes") or ""),
     }
 
 
@@ -417,11 +533,21 @@ def list_publications() -> list[dict[str, str]]:
     return sorted(publications, key=lambda item: item["date"], reverse=True)
 
 
-def render_archive_view(publications: list[dict[str, str]]) -> HTMLResponse:
+def render_archive_view(
+    publications: list[dict[str, str]],
+    *,
+    flipbook_type: str = "magazine",
+    page_title: str = "Green Builder Magazine Archive",
+    latest_label: str = "Latest Issue",
+    backlist_label: str = "Back Issues",
+) -> HTMLResponse:
+    selected_type = normalize_flipbook_type(flipbook_type)
     archive_publications = [
         publication
         for publication in publications
-        if publication["status"] == "processed" and publication["cover_url"]
+        if publication["status"] == "processed"
+        and publication["cover_url"]
+        and normalize_flipbook_type(publication.get("flipbook_type")) == selected_type
     ]
     featured = archive_publications[0] if archive_publications else None
     remaining_publications = archive_publications[1:] if featured else []
@@ -432,7 +558,7 @@ def render_archive_view(publications: list[dict[str, str]]) -> HTMLResponse:
             if featured["cover_url"]
             else "<span>No cover</span>"
         )
-        featured_markup = f"""<section class="featured"><a class="featured-cover" href="/book/{html.escape(featured['slug'])}" aria-label="Open {html.escape(featured['title'])}">{featured_cover}</a><div class="featured-copy"><p class="eyebrow">Latest Issue</p><h2><a href="/book/{html.escape(featured['slug'])}">{html.escape(featured['title'])}</a></h2><p class="lede">{html.escape(featured['description'])}</p><div class="featured-actions"><a class="button primary" href="/book/{html.escape(featured['slug'])}">Read Flipbook</a><a class="button" href="/api/publications/{html.escape(featured['slug'])}/original.pdf" download>Download PDF</a></div></div></section>"""
+        featured_markup = f"""<section class="featured"><a class="featured-cover" href="/book/{html.escape(featured['slug'])}" aria-label="Open {html.escape(featured['title'])}">{featured_cover}</a><div class="featured-copy"><p class="eyebrow">{html.escape(latest_label)}</p><h2><a href="/book/{html.escape(featured['slug'])}">{html.escape(featured['title'])}</a></h2><p class="lede">{html.escape(featured['description'])}</p><div class="featured-actions"><a class="button primary" href="/book/{html.escape(featured['slug'])}">Read Flipbook</a><a class="button" href="/api/publications/{html.escape(featured['slug'])}/original.pdf" download>Download PDF</a></div></div></section>"""
     else:
         featured_markup = '<p class="empty">No flipbooks have been published yet.</p>'
 
@@ -445,7 +571,7 @@ def render_archive_view(publications: list[dict[str, str]]) -> HTMLResponse:
         cards = ""
 
     return HTMLResponse(
-        content=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Green Builder Magazine Archive</title><style>:root{{color-scheme:dark;--bg:#0e141b;--bg-soft:#121a23;--panel:#18222d;--panel-strong:#202d39;--ink:#edf5f0;--muted:#a8b8b1;--line:#33414e;--brand:#29b17d;--brand-bright:#35c992}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at top left,rgba(41,177,125,.12),transparent 34rem),var(--bg);color:var(--ink)}}main{{width:min(1260px,100%);margin:0 auto;padding:34px 22px 56px}}header{{display:flex;align-items:flex-end;justify-content:flex-end;gap:16px;margin-bottom:28px}}.count{{color:var(--muted);font-size:14px}}.featured{{display:grid;grid-template-columns:minmax(240px,470px) minmax(0,1fr);gap:40px;align-items:center;margin-bottom:42px;padding-bottom:34px;border-bottom:1px solid var(--line)}}.featured-cover,.cover{{background:#202a35;overflow:hidden;display:grid;place-items:center;color:var(--muted);text-decoration:none}}.featured-cover{{aspect-ratio:648/783;border-radius:8px;box-shadow:0 28px 54px rgba(0,0,0,.42)}}.featured-cover img,.cover img{{width:100%;height:100%;object-fit:cover;display:block}}.eyebrow{{margin:0 0 12px;color:var(--brand-bright);font-weight:800;text-transform:uppercase;letter-spacing:0;font-size:14px}}h2{{margin:0 0 16px;font-size:clamp(34px,4.8vw,66px);line-height:1.02;letter-spacing:0}}h2 a,h3 a{{color:var(--ink);text-decoration:none}}h2 a:hover,h3 a:hover{{color:var(--brand-bright)}}.lede{{max-width:680px;margin:0 0 24px;color:var(--muted);font-size:18px;line-height:1.55}}.featured-actions{{display:flex;flex-wrap:wrap;gap:10px}}.button{{min-height:42px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:0 14px;font-weight:800;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}}.button:hover{{border-color:var(--brand-bright);background:var(--panel-strong)}}.button.primary{{background:var(--brand);border-color:var(--brand);color:#06120d}}.archive-heading{{margin:0 0 16px;color:var(--muted);font-size:13px;text-transform:uppercase;font-weight:800;letter-spacing:0}}.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:24px 20px}}.publication{{min-width:0}}.cover{{aspect-ratio:648/783;border:1px solid var(--line);border-radius:6px;margin-bottom:10px}}.publication:hover .cover{{border-color:var(--brand-bright)}}time{{display:block;color:var(--brand-bright);font-size:12px;font-weight:800;text-transform:uppercase;margin-bottom:6px}}h3{{margin:0;font-size:16px;line-height:1.25;letter-spacing:0}}.empty{{font-size:16px;color:var(--muted)}}@media(max-width:800px){{main{{padding:24px 14px 42px}}header{{align-items:flex-start;flex-direction:column}}.featured{{grid-template-columns:1fr;gap:22px}}.featured-cover{{max-width:420px}}.grid{{grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:18px 14px}}h3{{font-size:14px}}}}</style></head><body><main><header><div class="count">{len(archive_publications)} flipbook{'s' if len(archive_publications) != 1 else ''}</div></header>{featured_markup}<h2 class="archive-heading">Back Issues</h2><section class="grid">{cards}</section></main></body></html>"""
+        content=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(page_title)}</title><style>:root{{color-scheme:dark;--bg:#0e141b;--bg-soft:#121a23;--panel:#18222d;--panel-strong:#202d39;--ink:#edf5f0;--muted:#a8b8b1;--line:#33414e;--brand:#29b17d;--brand-bright:#35c992}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at top left,rgba(41,177,125,.12),transparent 34rem),var(--bg);color:var(--ink)}}main{{width:min(1260px,100%);margin:0 auto;padding:34px 22px 56px}}header{{display:flex;align-items:flex-end;justify-content:flex-end;gap:16px;margin-bottom:28px}}.count{{color:var(--muted);font-size:14px}}.featured{{display:grid;grid-template-columns:minmax(240px,470px) minmax(0,1fr);gap:40px;align-items:center;margin-bottom:42px;padding-bottom:34px;border-bottom:1px solid var(--line)}}.featured-cover,.cover{{background:#202a35;overflow:hidden;display:grid;place-items:center;color:var(--muted);text-decoration:none}}.featured-cover{{aspect-ratio:648/783;border-radius:8px;box-shadow:0 28px 54px rgba(0,0,0,.42)}}.featured-cover img,.cover img{{width:100%;height:100%;object-fit:cover;display:block}}.eyebrow{{margin:0 0 12px;color:var(--brand-bright);font-weight:800;text-transform:uppercase;letter-spacing:0;font-size:14px}}h2{{margin:0 0 16px;font-size:clamp(34px,4.8vw,66px);line-height:1.02;letter-spacing:0}}h2 a,h3 a{{color:var(--ink);text-decoration:none}}h2 a:hover,h3 a:hover{{color:var(--brand-bright)}}.lede{{max-width:680px;margin:0 0 24px;color:var(--muted);font-size:18px;line-height:1.55}}.featured-actions{{display:flex;flex-wrap:wrap;gap:10px}}.button{{min-height:42px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:0 14px;font-weight:800;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}}.button:hover{{border-color:var(--brand-bright);background:var(--panel-strong)}}.button.primary{{background:var(--brand);border-color:var(--brand);color:#06120d}}.archive-heading{{margin:0 0 16px;color:var(--muted);font-size:13px;text-transform:uppercase;font-weight:800;letter-spacing:0}}.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:24px 20px}}.publication{{min-width:0}}.cover{{aspect-ratio:648/783;border:1px solid var(--line);border-radius:6px;margin-bottom:10px}}.publication:hover .cover{{border-color:var(--brand-bright)}}time{{display:block;color:var(--brand-bright);font-size:12px;font-weight:800;text-transform:uppercase;margin-bottom:6px}}h3{{margin:0;font-size:16px;line-height:1.25;letter-spacing:0}}.empty{{font-size:16px;color:var(--muted)}}@media(max-width:800px){{main{{padding:24px 14px 42px}}header{{align-items:flex-start;flex-direction:column}}.featured{{grid-template-columns:1fr;gap:22px}}.featured-cover{{max-width:420px}}.grid{{grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:18px 14px}}h3{{font-size:14px}}}}</style></head><body><main><header><div class="count">{len(archive_publications)} flipbook{'s' if len(archive_publications) != 1 else ''}</div></header>{featured_markup}<h2 class="archive-heading">{html.escape(backlist_label)}</h2><section class="grid">{cards}</section></main></body></html>"""
     )
 
 
@@ -491,6 +617,112 @@ const manifest=JSON.parse(document.getElementById('manifest-data').textContent);
     )
 
 
+def render_admin_view(publications: list[dict[str, str]], admin_token: str) -> HTMLResponse:
+    rows = []
+    for publication in publications:
+        slug = html.escape(publication["slug"])
+        title = html.escape(publication["title"])
+        date = html.escape(publication["date"])
+        status = html.escape(publication["status"])
+        cover_url = html.escape(publication["cover_url"])
+        cover = (
+            f'<img src="{cover_url}" alt="{title} cover">'
+            if cover_url
+            else '<span class="cover-placeholder">No cover</span>'
+        )
+        options = "".join(
+            f'<option value="{html.escape(value)}"{" selected" if publication["flipbook_type"] == value else ""}>{html.escape(label)}</option>'
+            for value, label in VALID_FLIPBOOK_TYPES.items()
+        )
+        rows.append(
+            f"""<article class="publication-row"><label class="select-target"><input type="radio" name="selectedSlug" value="{slug}"><span class="cover">{cover}</span><span class="publication-copy"><strong>{title}</strong><span>{date} · {status}</span></span></label><label class="type-control"><span>Type</span><select data-slug="{slug}" class="type-select">{options}</select></label></article>"""
+        )
+    row_markup = "".join(rows) if rows else '<p class="empty">No flipbooks have been uploaded yet.</p>'
+    admin_token_json = json.dumps(admin_token)
+    template = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flipbook Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#0e141b;--panel:#141d27;--panel-strong:#1d2935;--ink:#edf5f0;--muted:#a8b8b1;--line:#344351;--brand:#29b17d;--danger:#c84d4d}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{width:min(1040px,100%);margin:0 auto;padding:22px}h1{margin:0 0 18px;font-size:32px;line-height:1.1;letter-spacing:0}.actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-width:0}h2{margin:0 0 12px;font-size:16px;letter-spacing:0}label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:700}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f151d;color:var(--ink);padding:9px}textarea{min-height:72px;resize:vertical}button{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;cursor:pointer;padding:0 12px}button:hover,button:focus-visible{border-color:var(--brand);outline:0}button.primary{background:var(--brand);border-color:var(--brand);color:#06120d}button.danger{background:#2c1719;border-color:#683137;color:#ffdcdc}.form-grid{display:grid;gap:10px}.status{position:sticky;top:0;z-index:2;margin-bottom:14px;border:1px solid var(--line);background:#101820;border-radius:8px;padding:10px;color:var(--muted);font-size:14px}.publication-list{display:grid;gap:10px}.publication-row{display:grid;grid-template-columns:minmax(0,1fr) 150px;gap:12px;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px}.select-target{grid-template-columns:auto 56px minmax(0,1fr);align-items:center;gap:10px;color:var(--ink);font-size:14px}.select-target input{width:18px;height:18px}.cover{width:56px;aspect-ratio:648/783;border:1px solid var(--line);border-radius:4px;background:#202a35;display:grid;place-items:center;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.cover img{width:100%;height:100%;object-fit:cover;display:block}.publication-copy{display:grid;gap:4px;min-width:0}.publication-copy strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.publication-copy span{color:var(--muted);font-size:12px}.type-control{grid-template-columns:1fr;gap:5px}.empty{color:var(--muted)}@media(max-width:860px){.actions{grid-template-columns:1fr}.publication-row{grid-template-columns:1fr}.type-control{max-width:220px}}
+</style>
+</head>
+<body>
+<main>
+<h1>Flipbook Admin</h1>
+<div class="status" id="status">Ready.</div>
+<section class="actions" aria-label="Flipbook actions">
+<form class="panel form-grid" id="uploadForm">
+<h2>Upload New Flipbook</h2>
+<label>PDF<input name="file" type="file" accept="application/pdf" required></label>
+<label>Issue Title <input name="issue_title" type="text" placeholder="Optional"></label>
+<label>Upload Date <input name="upload_date" type="date"></label>
+<label>Type <select name="flipbook_type"><option value="magazine">Magazine</option><option value="ebook">Ebook</option><option value="other">Other</option></select></label>
+<label>Version Notes <textarea name="version_notes" placeholder="What changed in this upload?"></textarea></label>
+<button class="primary" type="submit">Upload New</button>
+</form>
+<form class="panel form-grid" id="replaceForm">
+<h2>Replace Existing Flipbook</h2>
+<label>Replacement PDF<input name="file" type="file" accept="application/pdf" required></label>
+<label>Upload Date <input name="upload_date" type="date"></label>
+<label>Version Notes <textarea name="version_notes" placeholder="Why is this replacing the current PDF?"></textarea></label>
+<button class="primary" type="submit">Replace Selected</button>
+</form>
+<form class="panel form-grid" id="deleteForm">
+<h2>Delete a Flipbook</h2>
+<p class="empty">Select one flipbook below, then delete it from storage.</p>
+<button class="danger" type="submit">Delete Selected</button>
+</form>
+</section>
+<section class="publication-list" aria-label="Existing flipbooks">
+__ROWS__
+</section>
+</main>
+<script>
+const adminToken=__ADMIN_TOKEN__;const statusEl=document.getElementById('status');const today=new Date().toISOString().slice(0,10);document.querySelectorAll('input[type=date]').forEach((input)=>{if(!input.value)input.value=today});function setStatus(message){statusEl.textContent=message}function selectedSlug(){return document.querySelector('input[name=selectedSlug]:checked')?.value||''}function withToken(formData){formData.append('admin_token',adminToken);return formData}async function readJson(response){const data=await response.json().catch(()=>({detail:'Request failed.'}));if(!response.ok)throw new Error(data.detail||'Request failed.');return data}async function processPublication(slug,pageCount){let start=1;while(start<=pageCount){setStatus('Processing '+slug+' page '+start+' of '+pageCount+'...');const formData=withToken(new FormData());const response=await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/process-batch?start_page='+start+'&limit=5',{method:'POST',body:formData});const data=await readJson(response);if(Number(data.rendered_total)>=Number(data.page_count)){setStatus('Processed '+slug+'.');return data}start=Number(data.next_start_page||data.rendered_total+1)}}document.getElementById('uploadForm').addEventListener('submit',async(event)=>{event.preventDefault();try{setStatus('Uploading new flipbook...');const data=await readJson(await fetch('/admin/api/publications/upload',{method:'POST',body:withToken(new FormData(event.currentTarget))}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('replaceForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to replace.');return}try{setStatus('Replacing '+slug+'...');const data=await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/replace',{method:'POST',body:withToken(new FormData(event.currentTarget))}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('deleteForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to delete.');return}if(!confirm('Delete '+slug+'?'))return;try{setStatus('Deleting '+slug+'...');await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/delete',{method:'POST',body:withToken(new FormData())}));window.location.reload()}catch(error){setStatus(error.message)}});document.querySelectorAll('.type-select').forEach((select)=>select.addEventListener('change',async(event)=>{const slug=event.currentTarget.dataset.slug;try{const formData=withToken(new FormData());formData.append('flipbook_type',event.currentTarget.value);setStatus('Updating type for '+slug+'...');await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/type',{method:'POST',body:formData}));setStatus('Updated type for '+slug+'.')}catch(error){setStatus(error.message)}}));
+</script>
+</body>
+</html>"""
+    return HTMLResponse(
+        content=template
+        .replace("__ROWS__", row_markup)
+        .replace("__ADMIN_TOKEN__", admin_token_json)
+    )
+
+
+def process_publication_batch(slug: str, start_page: int, limit: int) -> dict[str, Any]:
+    normalized_slug = validate_slug(slug)
+    manifest = read_manifest(normalized_slug)
+    pdf_path = Path(manifest["original_pdf_path"])
+    if not manifest.get("links"):
+        manifest = refresh_embedded_links(normalized_slug, manifest)
+    rendered_batch = render_pdf_page_range(normalized_slug, pdf_path, start_page=start_page, limit=limit)
+    manifest["page_count"] = rendered_batch["page_count"]
+    manifest["pages"] = merge_page_assets(manifest.get("pages") or [], rendered_batch["rendered_pages"])
+    manifest["pages_path"] = rendered_batch["pages_path"]
+    manifest["thumbs_path"] = rendered_batch["thumbs_path"]
+    manifest["status"] = "processed" if len(manifest["pages"]) >= manifest["page_count"] else "processing"
+    if manifest["status"] == "processed":
+        manifest["processed_at"] = now_iso()
+    manifest["updated_at"] = now_iso()
+    manifest.pop("error", None)
+    manifest_file_path = write_manifest(normalized_slug, manifest)
+    return {
+        "status": manifest["status"],
+        "slug": normalized_slug,
+        "page_count": manifest["page_count"],
+        "rendered_this_batch": len(rendered_batch["rendered_pages"]),
+        "rendered_total": len(manifest["pages"]),
+        "next_start_page": rendered_batch["next_start_page"],
+        "link_count": len(manifest.get("links") or []),
+        "toc_page_number": manifest.get("toc_page_number"),
+        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
+        "manifest_path": str(manifest_file_path),
+    }
+
+
 app = FastAPI(title=APP_NAME, description="Minimal Render-deployable API for the GBM Flipbook service.", version="0.8.0")
 
 
@@ -515,7 +747,35 @@ def health_check() -> dict[str, str]:
 
 @app.get("/archive", response_class=HTMLResponse)
 def read_archive() -> HTMLResponse:
-    return render_archive_view(list_publications())
+    return render_archive_view(list_publications(), flipbook_type="magazine")
+
+
+@app.get("/ebooks", response_class=HTMLResponse)
+def read_ebooks() -> HTMLResponse:
+    return render_archive_view(
+        list_publications(),
+        flipbook_type="ebook",
+        page_title="Green Builder Ebooks",
+        latest_label="Latest Ebook",
+        backlist_label="Ebooks",
+    )
+
+
+@app.get("/other-titles", response_class=HTMLResponse)
+def read_other_titles() -> HTMLResponse:
+    return render_archive_view(
+        list_publications(),
+        flipbook_type="other",
+        page_title="Green Builder Other Titles",
+        latest_label="Latest Title",
+        backlist_label="Other Titles",
+    )
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def read_admin(admin_token: str | None = Query(default=None)) -> HTMLResponse:
+    require_admin_token(admin_token)
+    return render_admin_view(list_publications(), admin_token or "")
 
 
 @app.get("/api/publications")
@@ -589,37 +849,112 @@ def upload_publication_pdf(
     description: str | None = Form(default=None),
     publication_date: str | None = Form(default=None),
     source_url: str | None = Form(default=None),
+    flipbook_type: str | None = Form(default="magazine"),
 ) -> dict[str, Any]:
+    return save_publication_upload(
+        slug=slug,
+        file=file,
+        title=title,
+        description=description,
+        publication_date=publication_date,
+        source_url=source_url,
+        flipbook_type=flipbook_type,
+    )
+
+
+@app.post("/admin/api/publications/upload")
+def admin_upload_publication_pdf(
+    admin_token: str | None = Form(default=None),
+    file: UploadFile = File(...),
+    issue_title: str | None = Form(default=None),
+    upload_date: str | None = Form(default=None),
+    version_notes: str | None = Form(default=None),
+    flipbook_type: str | None = Form(default="magazine"),
+) -> dict[str, Any]:
+    require_admin_token(admin_token)
+    filename_stem = Path(file.filename or "").stem
+    title = (issue_title or filename_stem).strip()
+    slug = unique_slug(slugify(title))
+    return save_publication_upload(
+        slug=slug,
+        file=file,
+        title=title,
+        description=f"{flipbook_type_label(flipbook_type)} uploaded from Flipbook Admin",
+        publication_date=upload_date,
+        source_url="Flipbook Admin",
+        flipbook_type=flipbook_type,
+        upload_date=upload_date,
+        version_notes=version_notes,
+    )
+
+
+@app.post("/admin/api/publications/{slug}/replace")
+def admin_replace_publication_pdf(
+    slug: str,
+    admin_token: str | None = Form(default=None),
+    file: UploadFile = File(...),
+    upload_date: str | None = Form(default=None),
+    version_notes: str | None = Form(default=None),
+) -> dict[str, Any]:
+    require_admin_token(admin_token)
     normalized_slug = validate_slug(slug)
-    filename = file.filename or ""
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Upload must be a PDF file.")
-    destination_dir = publication_dir(normalized_slug)
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = destination_dir / "original.pdf"
-    with pdf_path.open("wb") as output_file:
-        shutil.copyfileobj(file.file, output_file)
-    page_count = get_pdf_page_count(pdf_path)
-    timestamp = now_iso()
-    manifest = {
+    existing_manifest = read_manifest(normalized_slug)
+    return save_publication_upload(
+        slug=normalized_slug,
+        file=file,
+        title=str(existing_manifest.get("title") or normalized_slug.replace("-", " ").title()),
+        description=str(existing_manifest.get("description") or ""),
+        publication_date=str(existing_manifest.get("publication_date") or ""),
+        source_url=str(existing_manifest.get("source_url") or "Flipbook Admin replacement"),
+        flipbook_type=str(existing_manifest.get("flipbook_type") or "magazine"),
+        upload_date=upload_date,
+        version_notes=version_notes,
+    )
+
+
+@app.post("/admin/api/publications/{slug}/type")
+def admin_update_publication_type(
+    slug: str,
+    admin_token: str | None = Form(default=None),
+    flipbook_type: str | None = Form(default=None),
+) -> dict[str, Any]:
+    require_admin_token(admin_token)
+    normalized_slug = validate_slug(slug)
+    manifest = read_manifest(normalized_slug)
+    manifest["flipbook_type"] = normalize_flipbook_type(flipbook_type)
+    manifest["updated_at"] = now_iso()
+    write_manifest(normalized_slug, manifest)
+    return {
+        "status": "updated",
         "slug": normalized_slug,
-        "title": title or normalized_slug.replace("-", " ").title(),
-        "description": description or "",
-        "status": "uploaded",
-        "original_pdf_path": str(pdf_path),
-        "page_count": page_count,
-        "publication_date": publication_date or "",
-        "source_url": source_url or "",
-        "created_at": timestamp,
-        "updated_at": timestamp,
-        "processed_at": None,
-        "toc_page_number": None,
-        "links": [],
-        "pages": [],
-        "viewer_settings": {},
+        "flipbook_type": manifest["flipbook_type"],
+        "flipbook_type_label": flipbook_type_label(manifest["flipbook_type"]),
     }
-    manifest_file_path = write_manifest(normalized_slug, manifest)
-    return {"status": "uploaded", "slug": normalized_slug, "page_count": page_count, "link_count": 0, "manifest_url": f"/api/publications/{normalized_slug}/manifest", "manifest_path": str(manifest_file_path), "pdf_path": str(pdf_path)}
+
+
+@app.post("/admin/api/publications/{slug}/delete")
+def admin_delete_publication(
+    slug: str,
+    admin_token: str | None = Form(default=None),
+) -> dict[str, str]:
+    require_admin_token(admin_token)
+    normalized_slug = validate_slug(slug)
+    target_dir = publication_dir(normalized_slug)
+    if not target_dir.exists():
+        raise HTTPException(status_code=404, detail="Publication not found.")
+    shutil.rmtree(target_dir)
+    return {"status": "deleted", "slug": normalized_slug}
+
+
+@app.post("/admin/api/publications/{slug}/process-batch")
+def admin_process_publication_pdf_batch(
+    slug: str,
+    admin_token: str | None = Form(default=None),
+    start_page: int = Query(default=1, ge=1),
+    limit: int = Query(default=5, ge=1, le=10),
+) -> dict[str, Any]:
+    require_admin_token(admin_token)
+    return process_publication_batch(slug, start_page, limit)
 
 
 @app.post("/api/publications/{slug}/process-batch")
@@ -628,34 +963,7 @@ def process_publication_pdf_batch(
     start_page: int = Query(default=1, ge=1),
     limit: int = Query(default=10, ge=1, le=25),
 ) -> dict[str, Any]:
-    normalized_slug = validate_slug(slug)
-    manifest = read_manifest(normalized_slug)
-    pdf_path = Path(manifest["original_pdf_path"])
-    if not manifest.get("links"):
-        manifest = refresh_embedded_links(normalized_slug, manifest)
-    rendered_batch = render_pdf_page_range(normalized_slug, pdf_path, start_page=start_page, limit=limit)
-    manifest["page_count"] = rendered_batch["page_count"]
-    manifest["pages"] = merge_page_assets(manifest.get("pages") or [], rendered_batch["rendered_pages"])
-    manifest["pages_path"] = rendered_batch["pages_path"]
-    manifest["thumbs_path"] = rendered_batch["thumbs_path"]
-    manifest["status"] = "processed" if len(manifest["pages"]) >= manifest["page_count"] else "processing"
-    if manifest["status"] == "processed":
-        manifest["processed_at"] = now_iso()
-    manifest["updated_at"] = now_iso()
-    manifest.pop("error", None)
-    manifest_file_path = write_manifest(normalized_slug, manifest)
-    return {
-        "status": manifest["status"],
-        "slug": normalized_slug,
-        "page_count": manifest["page_count"],
-        "rendered_this_batch": len(rendered_batch["rendered_pages"]),
-        "rendered_total": len(manifest["pages"]),
-        "next_start_page": rendered_batch["next_start_page"],
-        "link_count": len(manifest.get("links") or []),
-        "toc_page_number": manifest.get("toc_page_number"),
-        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
-        "manifest_path": str(manifest_file_path),
-    }
+    return process_publication_batch(slug, start_page, limit)
 
 
 @app.post("/api/publications/{slug}/process")
