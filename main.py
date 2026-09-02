@@ -311,6 +311,58 @@ def find_toc_page_number(pdf_path: Path, max_pages: int = 15) -> int | None:
     return None
 
 
+MANUAL_TOC_PAGE_LINKS: dict[str, dict[str, Any]] = {
+    "green-builder-q3-2026": {
+        "toc_page_number": 8,
+        "links": [
+            {"target_page_number": 10, "source_rect": {"x": 0.11, "y": 0.415, "width": 0.12, "height": 0.08}},
+            {"target_page_number": 34, "source_rect": {"x": 0.11, "y": 0.49, "width": 0.12, "height": 0.08}},
+            {"target_page_number": 42, "source_rect": {"x": 0.11, "y": 0.585, "width": 0.12, "height": 0.08}},
+            {"target_page_number": 48, "source_rect": {"x": 0.46, "y": 0.41, "width": 0.12, "height": 0.08}},
+            {"target_page_number": 52, "source_rect": {"x": 0.46, "y": 0.515, "width": 0.12, "height": 0.08}},
+            {"target_page_number": 2, "source_rect": {"x": 0.115, "y": 0.81, "width": 0.08, "height": 0.035}},
+            {"target_page_number": 6, "source_rect": {"x": 0.115, "y": 0.835, "width": 0.08, "height": 0.035}},
+            {"target_page_number": 64, "source_rect": {"x": 0.115, "y": 0.86, "width": 0.08, "height": 0.035}},
+        ],
+    }
+}
+
+
+def manual_toc_page_number(slug: str) -> int | None:
+    manual_toc = MANUAL_TOC_PAGE_LINKS.get(slug)
+    if manual_toc:
+        return int(manual_toc["toc_page_number"])
+    return None
+
+
+def get_manual_toc_page_links(slug: str, total_pages: int, embedded_links: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    manual_toc = MANUAL_TOC_PAGE_LINKS.get(slug)
+    if not manual_toc:
+        return []
+
+    toc_page_number = int(manual_toc["toc_page_number"])
+    existing_targets = {
+        int(link["target_page_number"])
+        for link in embedded_links
+        if int(link.get("source_page_number") or 0) == toc_page_number
+        and "target_page_number" in link
+    }
+    generated_links: list[dict[str, Any]] = []
+    for link in manual_toc["links"]:
+        target_page = int(link["target_page_number"])
+        if target_page in existing_targets or not 1 <= target_page <= total_pages:
+            continue
+        generated_links.append(
+            {
+                "source_page_number": toc_page_number,
+                "source_rect": link["source_rect"],
+                "target_page_number": target_page,
+                "generated": "manual-toc-page-number",
+            }
+        )
+    return generated_links
+
+
 def extract_toc_page_links(
     pdf_path: Path,
     total_pages: int,
@@ -483,9 +535,10 @@ def refresh_embedded_links(slug: str, manifest: dict[str, Any]) -> dict[str, Any
     page_count = int(manifest.get("page_count") or get_pdf_page_count(pdf_path))
     pdf_links = extract_pdf_links(pdf_path, page_count)
     pdf_links.extend(extract_toc_page_links(pdf_path, page_count, pdf_links))
+    pdf_links.extend(get_manual_toc_page_links(slug, page_count, pdf_links))
     manifest["page_count"] = page_count
     manifest["links"] = pdf_links
-    manifest["toc_page_number"] = find_toc_page_number(pdf_path) or detect_toc_page_number(pdf_links)
+    manifest["toc_page_number"] = manual_toc_page_number(slug) or find_toc_page_number(pdf_path) or detect_toc_page_number(pdf_links)
     manifest["updated_at"] = now_iso()
 
     if manifest.get("pages") and manifest.get("status") in {"processing", "uploaded", "error"}:
@@ -1087,9 +1140,10 @@ def process_publication_pdf(slug: str) -> dict[str, Any]:
         raise
     pdf_links = extract_pdf_links(pdf_path, rendered_assets["page_count"])
     pdf_links.extend(extract_toc_page_links(pdf_path, rendered_assets["page_count"], pdf_links))
+    pdf_links.extend(get_manual_toc_page_links(normalized_slug, rendered_assets["page_count"], pdf_links))
     manifest.update(rendered_assets)
     manifest["links"] = pdf_links
-    manifest["toc_page_number"] = find_toc_page_number(pdf_path) or detect_toc_page_number(pdf_links)
+    manifest["toc_page_number"] = manual_toc_page_number(normalized_slug) or find_toc_page_number(pdf_path) or detect_toc_page_number(pdf_links)
     manifest["status"] = "processed"
     manifest["processed_at"] = now_iso()
     manifest["updated_at"] = manifest["processed_at"]
