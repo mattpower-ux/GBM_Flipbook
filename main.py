@@ -313,7 +313,7 @@ def find_toc_page_number(pdf_path: Path, max_pages: int = 15) -> int | None:
 
 MANUAL_TOC_PAGE_LINKS: dict[str, dict[str, Any]] = {
     "green-builder-q3-2026": {
-        "toc_page_number": 8,
+        "toc_page_number": 10,
         "links": [
             {"target_page_number": 10, "source_rect": {"x": 0.085, "y": 0.395, "width": 0.16, "height": 0.095}},
             {"target_page_number": 34, "source_rect": {"x": 0.085, "y": 0.47, "width": 0.16, "height": 0.095}},
