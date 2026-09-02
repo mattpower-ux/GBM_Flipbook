@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pymupdf
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from pypdf import PdfReader
 from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, NumberObject
@@ -108,6 +108,15 @@ def reset_directory(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
+
+
+def page_asset(page_number: int, slug: str) -> dict[str, Any]:
+    filename = f"page-{page_number:03d}.jpg"
+    return {
+        "page_number": page_number,
+        "image_url": f"/api/publications/{slug}/assets/pages/{filename}",
+        "thumb_url": f"/api/publications/{slug}/assets/thumbs/{filename}",
+    }
 
 
 def get_pdf_object(value: Any) -> Any:
@@ -240,24 +249,41 @@ def detect_toc_page_number(links: list[dict[str, Any]]) -> int | None:
     return None
 
 
-def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
+def render_pdf_page_range(slug: str, pdf_path: Path, start_page: int, limit: int) -> dict[str, Any]:
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="Original PDF not found.")
 
     destination_dir = publication_dir(slug)
     pages_dir = destination_dir / "pages"
     thumbs_dir = destination_dir / "thumbs"
-    reset_directory(pages_dir)
-    reset_directory(thumbs_dir)
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         document = pymupdf.open(str(pdf_path))
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Original PDF could not be opened for processing.") from exc
 
+    if start_page < 1:
+        raise HTTPException(status_code=400, detail="start_page must be 1 or greater.")
+    if limit < 1 or limit > 25:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 25.")
+
     page_assets = []
     with document:
-        for page_index in range(document.page_count):
+        total_pages = document.page_count
+        if start_page > total_pages:
+            return {
+                "page_count": total_pages,
+                "rendered_pages": [],
+                "next_start_page": None,
+                "pages_path": str(pages_dir),
+                "thumbs_path": str(thumbs_dir),
+            }
+
+        end_page = min(total_pages, start_page + limit - 1)
+        for page_number in range(start_page, end_page + 1):
+            page_index = page_number - 1
             page_number = page_index + 1
             filename = f"page-{page_number:03d}.jpg"
             page = document.load_page(page_index)
@@ -279,17 +305,37 @@ def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
             del thumb_pixmap
             del page
 
-            page_assets.append(
-                {
-                    "page_number": page_number,
-                    "image_url": f"/api/publications/{slug}/assets/pages/{filename}",
-                    "thumb_url": f"/api/publications/{slug}/assets/thumbs/{filename}",
-                }
-            )
+            page_assets.append(page_asset(page_number, slug))
 
     return {
-        "page_count": len(page_assets),
-        "pages": page_assets,
+        "page_count": total_pages,
+        "rendered_pages": page_assets,
+        "next_start_page": end_page + 1 if end_page < total_pages else None,
+        "pages_path": str(pages_dir),
+        "thumbs_path": str(thumbs_dir),
+    }
+
+
+def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
+    destination_dir = publication_dir(slug)
+    pages_dir = destination_dir / "pages"
+    thumbs_dir = destination_dir / "thumbs"
+    reset_directory(pages_dir)
+    reset_directory(thumbs_dir)
+
+    page_count = get_pdf_page_count(pdf_path)
+    pages = []
+    start_page = 1
+    while start_page <= page_count:
+        batch = render_pdf_page_range(slug, pdf_path, start_page=start_page, limit=10)
+        pages.extend(batch["rendered_pages"])
+        if batch["next_start_page"] is None:
+            break
+        start_page = int(batch["next_start_page"])
+
+    return {
+        "page_count": page_count,
+        "pages": pages,
         "pages_path": str(pages_dir),
         "thumbs_path": str(thumbs_dir),
     }
@@ -313,6 +359,17 @@ def refresh_embedded_links(slug: str, manifest: dict[str, Any]) -> dict[str, Any
         manifest.pop("error", None)
 
     return manifest
+
+
+def merge_page_assets(existing_pages: list[Any], rendered_pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pages_by_number = {
+        int(page["page_number"]): page
+        for page in existing_pages
+        if isinstance(page, dict) and "page_number" in page
+    }
+    for page in rendered_pages:
+        pages_by_number[int(page["page_number"])] = page
+    return [pages_by_number[page_number] for page_number in sorted(pages_by_number)]
 
 
 def publication_date(manifest: dict[str, Any]) -> str:
@@ -443,6 +500,12 @@ def read_archive() -> HTMLResponse:
     return render_archive_view(list_publications())
 
 
+@app.get("/api/publications")
+def get_publications() -> dict[str, Any]:
+    publications = list_publications()
+    return {"publications": publications, "count": len(publications)}
+
+
 @app.get("/book/{slug}", response_class=HTMLResponse)
 def read_book(slug: str) -> HTMLResponse:
     normalized_slug = validate_slug(slug)
@@ -506,6 +569,8 @@ def upload_publication_pdf(
     file: UploadFile = File(...),
     title: str | None = Form(default=None),
     description: str | None = Form(default=None),
+    publication_date: str | None = Form(default=None),
+    source_url: str | None = Form(default=None),
 ) -> dict[str, Any]:
     normalized_slug = validate_slug(slug)
     filename = file.filename or ""
@@ -526,6 +591,8 @@ def upload_publication_pdf(
         "status": "uploaded",
         "original_pdf_path": str(pdf_path),
         "page_count": page_count,
+        "publication_date": publication_date or "",
+        "source_url": source_url or "",
         "created_at": timestamp,
         "updated_at": timestamp,
         "processed_at": None,
@@ -536,6 +603,41 @@ def upload_publication_pdf(
     }
     manifest_file_path = write_manifest(normalized_slug, manifest)
     return {"status": "uploaded", "slug": normalized_slug, "page_count": page_count, "link_count": len(pdf_links), "manifest_url": f"/api/publications/{normalized_slug}/manifest", "manifest_path": str(manifest_file_path), "pdf_path": str(pdf_path)}
+
+
+@app.post("/api/publications/{slug}/process-batch")
+def process_publication_pdf_batch(
+    slug: str,
+    start_page: int = Query(default=1, ge=1),
+    limit: int = Query(default=10, ge=1, le=25),
+) -> dict[str, Any]:
+    normalized_slug = validate_slug(slug)
+    manifest = read_manifest(normalized_slug)
+    pdf_path = Path(manifest["original_pdf_path"])
+    manifest = refresh_embedded_links(normalized_slug, manifest)
+    rendered_batch = render_pdf_page_range(normalized_slug, pdf_path, start_page=start_page, limit=limit)
+    manifest["page_count"] = rendered_batch["page_count"]
+    manifest["pages"] = merge_page_assets(manifest.get("pages") or [], rendered_batch["rendered_pages"])
+    manifest["pages_path"] = rendered_batch["pages_path"]
+    manifest["thumbs_path"] = rendered_batch["thumbs_path"]
+    manifest["status"] = "processed" if len(manifest["pages"]) >= manifest["page_count"] else "processing"
+    if manifest["status"] == "processed":
+        manifest["processed_at"] = now_iso()
+    manifest["updated_at"] = now_iso()
+    manifest.pop("error", None)
+    manifest_file_path = write_manifest(normalized_slug, manifest)
+    return {
+        "status": manifest["status"],
+        "slug": normalized_slug,
+        "page_count": manifest["page_count"],
+        "rendered_this_batch": len(rendered_batch["rendered_pages"]),
+        "rendered_total": len(manifest["pages"]),
+        "next_start_page": rendered_batch["next_start_page"],
+        "link_count": len(manifest.get("links") or []),
+        "toc_page_number": manifest.get("toc_page_number"),
+        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
+        "manifest_path": str(manifest_file_path),
+    }
 
 
 @app.post("/api/publications/{slug}/process")
