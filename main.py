@@ -282,6 +282,91 @@ def extract_pdf_links(pdf_path: Path, total_pages: int) -> list[dict[str, Any]]:
     return links
 
 
+def normalize_pymupdf_rect(rect: Any, page_width: float, page_height: float) -> dict[str, float] | None:
+    x0, y0, x1, y1 = [float(value) for value in rect]
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    if width <= 0 or height <= 0:
+        return None
+    return {
+        "x": max(0.0, min(1.0, x0 / page_width)),
+        "y": max(0.0, min(1.0, y0 / page_height)),
+        "width": max(0.0, min(1.0, width / page_width)),
+        "height": max(0.0, min(1.0, height / page_height)),
+    }
+
+
+def find_toc_page_number(pdf_path: Path, max_pages: int = 15) -> int | None:
+    try:
+        document = pymupdf.open(str(pdf_path))
+    except Exception:
+        return None
+    try:
+        for page_index in range(min(document.page_count, max_pages)):
+            text = document[page_index].get_text("text").lower()
+            if "table of contents" in text:
+                return page_index + 1
+    finally:
+        document.close()
+    return None
+
+
+def extract_toc_page_links(
+    pdf_path: Path,
+    total_pages: int,
+    embedded_links: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    toc_page_number = find_toc_page_number(pdf_path)
+    if toc_page_number is None:
+        return []
+
+    existing_targets = {
+        int(link["target_page_number"])
+        for link in embedded_links
+        if int(link.get("source_page_number") or 0) == toc_page_number
+        and "target_page_number" in link
+    }
+    try:
+        document = pymupdf.open(str(pdf_path))
+    except Exception:
+        return []
+
+    generated_links: list[dict[str, Any]] = []
+    seen_targets: set[int] = set()
+    try:
+        page = document[toc_page_number - 1]
+        page_width = float(page.rect.width)
+        page_height = float(page.rect.height)
+        text_page = page.get_text("dict")
+        for block in text_page.get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = str(span.get("text") or "").strip()
+                    if not re.fullmatch(r"\d{1,3}", text):
+                        continue
+                    target_page = int(text)
+                    if not 1 <= target_page <= total_pages:
+                        continue
+                    if target_page == toc_page_number or target_page in existing_targets or target_page in seen_targets:
+                        continue
+                    source_rect = normalize_pymupdf_rect(span.get("bbox"), page_width, page_height)
+                    if source_rect is None:
+                        continue
+                    generated_links.append(
+                        {
+                            "source_page_number": toc_page_number,
+                            "source_rect": source_rect,
+                            "target_page_number": target_page,
+                            "generated": "toc-page-number",
+                        }
+                    )
+                    seen_targets.add(target_page)
+    finally:
+        document.close()
+
+    return generated_links
+
+
 def detect_toc_page_number(links: list[dict[str, Any]]) -> int | None:
     internal_link_counts: dict[int, int] = {}
     for link in links:
@@ -397,9 +482,10 @@ def refresh_embedded_links(slug: str, manifest: dict[str, Any]) -> dict[str, Any
 
     page_count = int(manifest.get("page_count") or get_pdf_page_count(pdf_path))
     pdf_links = extract_pdf_links(pdf_path, page_count)
+    pdf_links.extend(extract_toc_page_links(pdf_path, page_count, pdf_links))
     manifest["page_count"] = page_count
     manifest["links"] = pdf_links
-    manifest["toc_page_number"] = detect_toc_page_number(pdf_links)
+    manifest["toc_page_number"] = find_toc_page_number(pdf_path) or detect_toc_page_number(pdf_links)
     manifest["updated_at"] = now_iso()
 
     if manifest.get("pages") and manifest.get("status") in {"processing", "uploaded", "error"}:
@@ -1000,9 +1086,10 @@ def process_publication_pdf(slug: str) -> dict[str, Any]:
         write_manifest(normalized_slug, manifest)
         raise
     pdf_links = extract_pdf_links(pdf_path, rendered_assets["page_count"])
+    pdf_links.extend(extract_toc_page_links(pdf_path, rendered_assets["page_count"], pdf_links))
     manifest.update(rendered_assets)
     manifest["links"] = pdf_links
-    manifest["toc_page_number"] = detect_toc_page_number(pdf_links)
+    manifest["toc_page_number"] = find_toc_page_number(pdf_path) or detect_toc_page_number(pdf_links)
     manifest["status"] = "processed"
     manifest["processed_at"] = now_iso()
     manifest["updated_at"] = manifest["processed_at"]
