@@ -632,6 +632,13 @@ def publication_date(manifest: dict[str, Any]) -> str:
     return "Date pending"
 
 
+def external_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if url.startswith(("https://", "http://")):
+        return url
+    return ""
+
+
 def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
     slug = str(manifest.get("slug") or "")
     pages = manifest.get("pages") or []
@@ -650,6 +657,7 @@ def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
         "flipbook_type_label": VALID_FLIPBOOK_TYPES[flipbook_type],
         "upload_date": str(manifest.get("upload_date") or "")[:10],
         "version_notes": str(manifest.get("version_notes") or ""),
+        "interactive_url": external_url(manifest.get("interactive_url")),
     }
 
 
@@ -699,20 +707,25 @@ def render_archive_view(
             if featured["cover_url"]
             else "<span>No cover</span>"
         )
-        featured_markup = f"""<section class="featured"><a class="featured-cover" href="/book/{html.escape(featured['slug'])}" aria-label="Open {html.escape(featured['title'])}">{featured_cover}</a><div class="featured-copy"><p class="eyebrow">{html.escape(latest_label)}</p><h2><a href="/book/{html.escape(featured['slug'])}">{html.escape(featured['title'])}</a></h2><p class="lede">{html.escape(featured['description'])}</p><div class="featured-actions"><a class="button primary" href="/book/{html.escape(featured['slug'])}">Read Flipbook</a><a class="button" href="/api/publications/{html.escape(featured['slug'])}/original.pdf" download>Download PDF</a></div></div></section>"""
+        featured_interactive = (
+            f"""<a class="button" href="{html.escape(featured["interactive_url"])}" target="_blank" rel="noopener noreferrer">Interactive Version</a>"""
+            if featured.get("interactive_url")
+            else ""
+        )
+        featured_markup = f"""<section class="featured"><a class="featured-cover" href="/book/{html.escape(featured['slug'])}" aria-label="Open {html.escape(featured['title'])}">{featured_cover}</a><div class="featured-copy"><p class="eyebrow">{html.escape(latest_label)}</p><h2><a href="/book/{html.escape(featured['slug'])}">{html.escape(featured['title'])}</a></h2><p class="lede">{html.escape(featured['description'])}</p><div class="featured-actions"><a class="button primary" href="/book/{html.escape(featured['slug'])}">Read Flipbook</a>{featured_interactive}<a class="button" href="/api/publications/{html.escape(featured['slug'])}/original.pdf" download>Download PDF</a></div></div></section>"""
     else:
         featured_markup = '<p class="empty">No flipbooks have been published yet.</p>'
 
     if remaining_publications:
         cards = "".join(
-            f"""<article class="publication"><a class="cover" href="/book/{html.escape(pub['slug'])}" aria-label="Open {html.escape(pub['title'])}">{f'<img src="{html.escape(pub["cover_url"])}" alt="{html.escape(pub["title"])} cover" loading="lazy">' if pub['cover_url'] else '<span>No cover</span>'}</a><time>{html.escape(pub['date'])}</time><h3><a href="/book/{html.escape(pub['slug'])}">{html.escape(pub['title'])}</a></h3></article>"""
+            f"""<article class="publication"><a class="cover" href="/book/{html.escape(pub['slug'])}" aria-label="Open {html.escape(pub['title'])}">{f'<img src="{html.escape(pub["cover_url"])}" alt="{html.escape(pub["title"])} cover" loading="lazy">' if pub['cover_url'] else '<span>No cover</span>'}</a><time>{html.escape(pub['date'])}</time><h3><a href="/book/{html.escape(pub['slug'])}">{html.escape(pub['title'])}</a></h3>{f'<a class="text-link" href="{html.escape(pub["interactive_url"])}" target="_blank" rel="noopener noreferrer">Interactive version</a>' if pub.get('interactive_url') else ''}</article>"""
             for pub in remaining_publications
         )
     else:
         cards = ""
 
     return HTMLResponse(
-        content=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(page_title)}</title><style>:root{{color-scheme:dark;--bg:#0e141b;--bg-soft:#121a23;--panel:#18222d;--panel-strong:#202d39;--ink:#edf5f0;--muted:#a8b8b1;--line:#33414e;--brand:#29b17d;--brand-bright:#35c992}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at top left,rgba(41,177,125,.12),transparent 34rem),var(--bg);color:var(--ink)}}main{{width:min(1260px,100%);margin:0 auto;padding:34px 22px 56px}}header{{display:flex;align-items:flex-end;justify-content:flex-end;gap:16px;margin-bottom:28px}}.count{{color:var(--muted);font-size:14px}}.featured{{display:grid;grid-template-columns:minmax(240px,470px) minmax(0,1fr);gap:40px;align-items:center;margin-bottom:42px;padding-bottom:34px;border-bottom:1px solid var(--line)}}.featured-cover,.cover{{background:#202a35;overflow:hidden;display:grid;place-items:center;color:var(--muted);text-decoration:none}}.featured-cover{{aspect-ratio:648/783;border-radius:8px;box-shadow:0 28px 54px rgba(0,0,0,.42)}}.featured-cover img,.cover img{{width:100%;height:100%;object-fit:cover;display:block}}.eyebrow{{margin:0 0 12px;color:var(--brand-bright);font-weight:800;text-transform:uppercase;letter-spacing:0;font-size:14px}}h2{{margin:0 0 16px;font-size:clamp(34px,4.8vw,66px);line-height:1.02;letter-spacing:0}}h2 a,h3 a{{color:var(--ink);text-decoration:none}}h2 a:hover,h3 a:hover{{color:var(--brand-bright)}}.lede{{max-width:680px;margin:0 0 24px;color:var(--muted);font-size:18px;line-height:1.55}}.featured-actions{{display:flex;flex-wrap:wrap;gap:10px}}.button{{min-height:42px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:0 14px;font-weight:800;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}}.button:hover{{border-color:var(--brand-bright);background:var(--panel-strong)}}.button.primary{{background:var(--brand);border-color:var(--brand);color:#06120d}}.archive-heading{{margin:0 0 16px;color:var(--muted);font-size:13px;text-transform:uppercase;font-weight:800;letter-spacing:0}}.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:24px 20px}}.publication{{min-width:0}}.cover{{aspect-ratio:648/783;border:1px solid var(--line);border-radius:6px;margin-bottom:10px}}.publication:hover .cover{{border-color:var(--brand-bright)}}time{{display:block;color:var(--brand-bright);font-size:12px;font-weight:800;text-transform:uppercase;margin-bottom:6px}}h3{{margin:0;font-size:16px;line-height:1.25;letter-spacing:0}}.empty{{font-size:16px;color:var(--muted)}}@media(max-width:800px){{main{{padding:24px 14px 42px}}header{{align-items:flex-start;flex-direction:column}}.featured{{grid-template-columns:1fr;gap:22px}}.featured-cover{{max-width:420px}}.grid{{grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:18px 14px}}h3{{font-size:14px}}}}</style></head><body><main><header><div class="count">{len(archive_publications)} flipbook{'s' if len(archive_publications) != 1 else ''}</div></header>{featured_markup}<h2 class="archive-heading">{html.escape(backlist_label)}</h2><section class="grid">{cards}</section></main></body></html>"""
+        content=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(page_title)}</title><style>:root{{color-scheme:dark;--bg:#0e141b;--bg-soft:#121a23;--panel:#18222d;--panel-strong:#202d39;--ink:#edf5f0;--muted:#a8b8b1;--line:#33414e;--brand:#29b17d;--brand-bright:#35c992}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at top left,rgba(41,177,125,.12),transparent 34rem),var(--bg);color:var(--ink)}}main{{width:min(1260px,100%);margin:0 auto;padding:34px 22px 56px}}header{{display:flex;align-items:flex-end;justify-content:flex-end;gap:16px;margin-bottom:28px}}.count{{color:var(--muted);font-size:14px}}.featured{{display:grid;grid-template-columns:minmax(240px,470px) minmax(0,1fr);gap:40px;align-items:center;margin-bottom:42px;padding-bottom:34px;border-bottom:1px solid var(--line)}}.featured-cover,.cover{{background:#202a35;overflow:hidden;display:grid;place-items:center;color:var(--muted);text-decoration:none}}.featured-cover{{aspect-ratio:648/783;border-radius:8px;box-shadow:0 28px 54px rgba(0,0,0,.42)}}.featured-cover img,.cover img{{width:100%;height:100%;object-fit:cover;display:block}}.eyebrow{{margin:0 0 12px;color:var(--brand-bright);font-weight:800;text-transform:uppercase;letter-spacing:0;font-size:14px}}h2{{margin:0 0 16px;font-size:clamp(34px,4.8vw,66px);line-height:1.02;letter-spacing:0}}h2 a,h3 a{{color:var(--ink);text-decoration:none}}h2 a:hover,h3 a:hover,.text-link:hover{{color:var(--brand-bright)}}.lede{{max-width:680px;margin:0 0 24px;color:var(--muted);font-size:18px;line-height:1.55}}.featured-actions{{display:flex;flex-wrap:wrap;gap:10px}}.button{{min-height:42px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:0 14px;font-weight:800;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}}.button:hover{{border-color:var(--brand-bright);background:var(--panel-strong)}}.button.primary{{background:var(--brand);border-color:var(--brand);color:#06120d}}.archive-heading{{margin:0 0 16px;color:var(--muted);font-size:13px;text-transform:uppercase;font-weight:800;letter-spacing:0}}.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:24px 20px}}.publication{{min-width:0}}.cover{{aspect-ratio:648/783;border:1px solid var(--line);border-radius:6px;margin-bottom:10px}}.publication:hover .cover{{border-color:var(--brand-bright)}}time{{display:block;color:var(--brand-bright);font-size:12px;font-weight:800;text-transform:uppercase;margin-bottom:6px}}h3{{margin:0;font-size:16px;line-height:1.25;letter-spacing:0}}.text-link{{display:inline-flex;margin-top:8px;color:var(--muted);font-size:13px;font-weight:800;text-decoration:none}}.empty{{font-size:16px;color:var(--muted)}}@media(max-width:800px){{main{{padding:24px 14px 42px}}header{{align-items:flex-start;flex-direction:column}}.featured{{grid-template-columns:1fr;gap:22px}}.featured-cover{{max-width:420px}}.grid{{grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:18px 14px}}h3{{font-size:14px}}}}</style></head><body><main><header><div class="count">{len(archive_publications)} flipbook{'s' if len(archive_publications) != 1 else ''}</div></header>{featured_markup}<h2 class="archive-heading">{html.escape(backlist_label)}</h2><section class="grid">{cards}</section></main></body></html>"""
     )
 
 
@@ -729,6 +742,12 @@ def render_book_viewer(manifest: dict[str, Any]) -> HTMLResponse:
     description = html.escape(str(manifest.get("description") or ""))
     slug = html.escape(str(manifest.get("slug") or ""))
     status = html.escape(str(manifest.get("status") or "unknown"))
+    interactive_url = external_url(manifest.get("interactive_url"))
+    interactive_button = (
+        f"""<a class="button" href="{html.escape(interactive_url)}" target="_blank" rel="noopener noreferrer" title="Open the media-rich interactive version">Interactive Version</a>"""
+        if interactive_url
+        else ""
+    )
     manifest_json = html.escape(json.dumps(manifest), quote=False)
     template = """<!doctype html>
 <html lang="en">
@@ -741,7 +760,7 @@ def render_book_viewer(manifest: dict[str, Any]) -> HTMLResponse:
 </style>
 </head>
 <body>
-<div class="app"><header><a class="button archive-button" href="/archive" title="Return to publication archive">Return to Archive</a><div class="title-block"><h1>__TITLE__</h1><div class="meta"><span>__DESCRIPTION__</span><span id="status"> __STATUS__</span></div></div></header><div class="layout"><aside aria-label="Thumbnails"><div class="thumbs" id="thumbs"></div></aside><main class="stage-wrap" id="stageWrap"><div class="reader-bar"><div class="toolbar" aria-label="Page controls"><button type="button" id="prevBtn" title="Previous page">Prev</button><span class="counter" id="pageCounter">Page 0 / 0</span><button type="button" id="nextBtn" title="Next page">Next</button></div><div class="toolbar" aria-label="View controls"><button type="button" id="zoomOutBtn" title="Zoom out">-</button><button type="button" id="zoomInBtn" title="Zoom in">+</button><button type="button" id="spreadBtn" title="Show side-by-side page spreads after the cover" aria-pressed="false">SHOW SPREADS</button><button type="button" id="tocBtn" title="Table of contents">TOC</button><button type="button" id="fullscreenBtn" title="Fullscreen">Full</button><button type="button" id="shareBtn" title="Copy link">Share</button></div><div class="reader-actions"><a class="button download-button" href="/api/publications/__SLUG__/original.pdf" download title="Download full PDF">Download PDF</a></div></div><div class="stage" id="stage"></div></main></div><a class="button exit-button" href="/archive" title="Exit to publication archive">Exit</a></div>
+<div class="app"><header><a class="button archive-button" href="/archive" title="Return to publication archive">Return to Archive</a><div class="title-block"><h1>__TITLE__</h1><div class="meta"><span>__DESCRIPTION__</span><span id="status"> __STATUS__</span></div></div></header><div class="layout"><aside aria-label="Thumbnails"><div class="thumbs" id="thumbs"></div></aside><main class="stage-wrap" id="stageWrap"><div class="reader-bar"><div class="toolbar" aria-label="Page controls"><button type="button" id="prevBtn" title="Previous page">Prev</button><span class="counter" id="pageCounter">Page 0 / 0</span><button type="button" id="nextBtn" title="Next page">Next</button></div><div class="toolbar" aria-label="View controls"><button type="button" id="zoomOutBtn" title="Zoom out">-</button><button type="button" id="zoomInBtn" title="Zoom in">+</button><button type="button" id="spreadBtn" title="Show side-by-side page spreads after the cover" aria-pressed="false">SHOW SPREADS</button><button type="button" id="tocBtn" title="Table of contents">TOC</button><button type="button" id="fullscreenBtn" title="Fullscreen">Full</button><button type="button" id="shareBtn" title="Copy link">Share</button></div><div class="reader-actions">__INTERACTIVE_BUTTON__<a class="button download-button" href="/api/publications/__SLUG__/original.pdf" download title="Download full PDF">Download PDF</a></div></div><div class="stage" id="stage"></div></main></div><a class="button exit-button" href="/archive" title="Exit to publication archive">Exit</a></div>
 <script type="application/json" id="manifest-data">__MANIFEST__</script>
 <script>
 const manifest=JSON.parse(document.getElementById('manifest-data').textContent);const pages=Array.isArray(manifest.pages)?manifest.pages:[];const links=Array.isArray(manifest.links)?manifest.links:[];const linksByPage=links.reduce((acc,link)=>{const page=String(link.source_page_number);(acc[page]||(acc[page]=[])).push(link);return acc},{});const stage=document.getElementById('stage');const thumbs=document.getElementById('thumbs');const counter=document.getElementById('pageCounter');const prevBtn=document.getElementById('prevBtn');const nextBtn=document.getElementById('nextBtn');const zoomInBtn=document.getElementById('zoomInBtn');const zoomOutBtn=document.getElementById('zoomOutBtn');const spreadBtn=document.getElementById('spreadBtn');const fullscreenBtn=document.getElementById('fullscreenBtn');const shareBtn=document.getElementById('shareBtn');const tocBtn=document.getElementById('tocBtn');const stageWrap=document.getElementById('stageWrap');let pageIndex=0;let zoom=1;let spreadsEnabled=false;function pageUrl(path){return new URL(path,window.location.origin).toString()}function normalizePageIndex(index){const bounded=Math.max(0,Math.min(index,pages.length-1));if(!spreadsEnabled||bounded===0)return bounded;return bounded%2===0?bounded-1:bounded}function visiblePageIndexes(){if(!spreadsEnabled||pageIndex===0)return[pageIndex];return[pageIndex,pageIndex+1].filter((index)=>index<pages.length)}function syncHash(){const pageNumber=pageIndex+1;if(window.location.hash!=='#page-'+pageNumber)history.replaceState(null,'','#page-'+pageNumber)}function addPdfLinks(frame,pageNumber){(linksByPage[String(pageNumber)]||[]).forEach((link)=>{const rect=link.source_rect;if(!rect)return;const button=document.createElement('button');button.type='button';button.className='pdf-hotspot'+(link.generated==='manual-toc-page-number'?' generated-link':'');button.title=link.uri?'Open link':'Go to page '+link.target_page_number;button.setAttribute('aria-label',button.title);button.style.left=(rect.x*100)+'%';button.style.top=(rect.y*100)+'%';button.style.width=(rect.width*100)+'%';button.style.height=(rect.height*100)+'%';button.addEventListener('click',()=>{if(link.uri)window.open(link.uri,'_blank','noopener,noreferrer');else if(link.target_page_number)showPage(Number(link.target_page_number)-1)});frame.append(button)})}function buildPageFrame(page){const frame=document.createElement('div');frame.className='page-frame';frame.style.setProperty('--zoom',String(zoom));const img=document.createElement('img');img.src=pageUrl(page.image_url);img.alt=manifest.title+', page '+page.page_number;frame.append(img);addPdfLinks(frame,Number(page.page_number));return frame}function showPage(index){if(!pages.length){stage.innerHTML='<p class="empty">This publication has no rendered pages yet.</p>';counter.textContent='Page 0 / 0';prevBtn.disabled=true;nextBtn.disabled=true;spreadBtn.disabled=true;return}pageIndex=normalizePageIndex(index);const indexes=visiblePageIndexes();stage.innerHTML='';stage.classList.toggle('spread-view',spreadsEnabled&&indexes.length>1);if(indexes.length>1){const spread=document.createElement('div');spread.className='spread-frame';spread.style.setProperty('--zoom',String(zoom));indexes.forEach((pageNumberIndex)=>spread.append(buildPageFrame(pages[pageNumberIndex])));stage.append(spread)}else{stage.append(buildPageFrame(pages[pageIndex]))}const pageNumbers=indexes.map((pageNumberIndex)=>pages[pageNumberIndex].page_number);counter.textContent=pageNumbers.length>1?'Pages '+pageNumbers.join('-')+' / '+pages.length:'Page '+pageNumbers[0]+' / '+pages.length;prevBtn.disabled=pageIndex===0;nextBtn.disabled=spreadsEnabled?pageIndex>=pages.length-2:pageIndex===pages.length-1;const activeIndexes=new Set(indexes.map(String));document.querySelectorAll('.thumb').forEach((thumb)=>thumb.setAttribute('aria-current',activeIndexes.has(thumb.dataset.index)?'true':'false'));stageWrap.scrollTo({top:0,behavior:'smooth'});syncHash()}function movePage(direction){if(!spreadsEnabled)showPage(pageIndex+direction);else if(direction>0)showPage(pageIndex===0?1:pageIndex+2);else showPage(pageIndex<=1?0:pageIndex-2)}function setZoom(nextZoom){zoom=Math.max(.7,Math.min(nextZoom,2.4));document.querySelectorAll('.page-frame,.spread-frame').forEach((frame)=>frame.style.setProperty('--zoom',String(zoom)))}function renderThumbs(){thumbs.innerHTML='';pages.forEach((page,index)=>{const button=document.createElement('button');button.type='button';button.className='thumb';button.setAttribute('aria-label','Page '+page.page_number);button.dataset.index=String(index);const img=document.createElement('img');img.src=pageUrl(page.thumb_url);img.alt='';img.loading='lazy';const label=document.createElement('span');label.textContent=String(page.page_number);button.append(img,label);button.addEventListener('click',()=>showPage(index));thumbs.append(button)})}prevBtn.addEventListener('click',()=>movePage(-1));nextBtn.addEventListener('click',()=>movePage(1));zoomInBtn.addEventListener('click',()=>setZoom(zoom+.15));zoomOutBtn.addEventListener('click',()=>setZoom(zoom-.15));spreadBtn.addEventListener('click',()=>{spreadsEnabled=!spreadsEnabled;spreadBtn.setAttribute('aria-pressed',String(spreadsEnabled));spreadBtn.textContent=spreadsEnabled?'SHOW SINGLE':'SHOW SPREADS';showPage(pageIndex)});tocBtn.addEventListener('click',()=>{if(manifest.toc_page_number)showPage(Number(manifest.toc_page_number)-1)});fullscreenBtn.addEventListener('click',()=>{if(!document.fullscreenElement)document.documentElement.requestFullscreen?.();else document.exitFullscreen?.()});shareBtn.addEventListener('click',async()=>{syncHash();await navigator.clipboard?.writeText(window.location.href);shareBtn.textContent='Copied';window.setTimeout(()=>shareBtn.textContent='Share',1200)});document.addEventListener('keydown',(event)=>{if(event.key==='ArrowLeft'||event.key==='PageUp'){event.preventDefault();movePage(-1)}if(event.key==='ArrowRight'||event.key==='PageDown'){event.preventDefault();movePage(1)}});window.addEventListener('hashchange',()=>{const match=window.location.hash.match(/^#page-(\\d+)$/);if(match)showPage(Number(match[1])-1)});const initialMatch=window.location.hash.match(/^#page-(\\d+)$/);if(initialMatch)pageIndex=Number(initialMatch[1])-1;renderThumbs();showPage(pageIndex);
@@ -754,6 +773,7 @@ const manifest=JSON.parse(document.getElementById('manifest-data').textContent);
         .replace("__DESCRIPTION__", description)
         .replace("__STATUS__", status)
         .replace("__SLUG__", slug)
+        .replace("__INTERACTIVE_BUTTON__", interactive_button)
         .replace("__MANIFEST__", manifest_json)
     )
 
@@ -1083,6 +1103,39 @@ def admin_update_publication_type(
         "slug": normalized_slug,
         "flipbook_type": manifest["flipbook_type"],
         "flipbook_type_label": flipbook_type_label(manifest["flipbook_type"]),
+    }
+
+
+@app.post("/admin/api/publications/{slug}/metadata")
+def admin_update_publication_metadata(
+    slug: str,
+    admin_token: str | None = Form(default=None),
+    interactive_url: str | None = Form(default=None),
+    source_url: str | None = Form(default=None),
+) -> dict[str, Any]:
+    require_admin_token(admin_token)
+    normalized_slug = validate_slug(slug)
+    manifest = read_manifest(normalized_slug)
+
+    if interactive_url is not None:
+        cleaned_interactive_url = external_url(interactive_url)
+        if interactive_url.strip() and not cleaned_interactive_url:
+            raise HTTPException(status_code=400, detail="Interactive URL must start with http:// or https://.")
+        manifest["interactive_url"] = cleaned_interactive_url
+
+    if source_url is not None:
+        cleaned_source_url = external_url(source_url)
+        if source_url.strip() and not cleaned_source_url:
+            raise HTTPException(status_code=400, detail="Source URL must start with http:// or https://.")
+        manifest["source_url"] = cleaned_source_url
+
+    manifest["updated_at"] = now_iso()
+    write_manifest(normalized_slug, manifest)
+    return {
+        "status": "updated",
+        "slug": normalized_slug,
+        "interactive_url": manifest.get("interactive_url") or "",
+        "source_url": manifest.get("source_url") or "",
     }
 
 
