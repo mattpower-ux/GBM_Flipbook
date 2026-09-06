@@ -730,7 +730,15 @@ def render_archive_view(
     embedded: bool = False,
 ) -> HTMLResponse:
     selected_type = normalize_flipbook_type(flipbook_type)
-    body_class = ' class="embed"' if embedded else ""
+    archive_body_styles = (
+        "--bg:#ffffff;--bg-soft:#ffffff;--panel:#ffffff;--panel-strong:#eef7f4;"
+        "--ink:#303052;--muted:#4f5e68;--line:#dde5ea;--brand:#25b783;"
+        "--brand-bright:#03c78a;background:#ffffff;color:var(--ink)"
+    )
+    body_classes = ["archive-light"]
+    if embedded:
+        body_classes.append("embed")
+    body_class = f' class="{" ".join(body_classes)}" style="{archive_body_styles}"'
     archive_publications = [
         publication
         for publication in publications
