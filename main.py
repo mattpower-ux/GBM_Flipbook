@@ -1145,11 +1145,11 @@ def read_admin(
     return render_admin_view(list_publications(), section=section)
 
 
-@app.post("/admin/login")
+@app.post("/admin/login", response_model=None)
 def login_admin(
     password: str = Form(...),
     section: str = Form(default="magazine"),
-) -> RedirectResponse | HTMLResponse:
+):
     selected_section = normalize_flipbook_type(section)
     if not secrets.compare_digest(password, get_admin_password()):
         return render_admin_login(section=selected_section, error="Incorrect password.")
