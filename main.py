@@ -1,4 +1,6 @@
 import html
+import hmac
+import hashlib
 import json
 import os
 import re
@@ -9,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import pymupdf
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pypdf import PdfReader
 from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, NumberObject
 
@@ -22,7 +24,9 @@ THUMB_RENDER_SCALE = 0.35
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ASSET_FILENAME_PATTERN = re.compile(r"^page-[0-9]{3,5}\.jpg$")
 VALID_FLIPBOOK_TYPES = {"magazine": "Magazine", "ebook": "Ebook"}
-ADMIN_TOKEN_ENV = "FLIPBOOK_ADMIN_TOKEN"
+ADMIN_PASSWORD_ENV = "FLIPBOOK_ADMIN_PASSWORD"
+DEFAULT_ADMIN_PASSWORD = "1313"
+ADMIN_SESSION_COOKIE = "flipbook_admin_session"
 MAGAZINE_SUBSCRIPTION_URL = "https://app.hubspot.com/payments/RyZtj5CYSiem?referrer=PAYMENT_LINK"
 EDITOR_EMAIL = "matt.power@greenbuildermedia.com"
 HUBSPOT_PORTAL_ID = "309276"
@@ -100,20 +104,23 @@ def flipbook_type_label(value: str | None) -> str:
     return VALID_FLIPBOOK_TYPES[normalize_flipbook_type(value)]
 
 
-def get_admin_token() -> str:
-    token = os.getenv(ADMIN_TOKEN_ENV, "").strip()
-    if not token:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Set {ADMIN_TOKEN_ENV} in Render before using Flipbook Admin.",
-        )
-    return token
+def get_admin_password() -> str:
+    return os.getenv(ADMIN_PASSWORD_ENV, DEFAULT_ADMIN_PASSWORD).strip() or DEFAULT_ADMIN_PASSWORD
 
 
-def require_admin_token(admin_token: str | None) -> None:
-    expected_token = get_admin_token()
-    provided_token = str(admin_token or "")
-    if not secrets.compare_digest(provided_token, expected_token):
+def admin_session_value() -> str:
+    signature = hmac.new(
+        get_admin_password().encode("utf-8"),
+        b"gbm-flipbook-admin",
+        hashlib.sha256,
+    ).hexdigest()
+    return f"v1:{signature}"
+
+
+def require_admin_request(request: Request) -> None:
+    expected_session = admin_session_value()
+    provided_session = str(request.cookies.get(ADMIN_SESSION_COOKIE) or "")
+    if not secrets.compare_digest(provided_session, expected_session):
         raise HTTPException(status_code=401, detail="Admin access required.")
 
 
@@ -883,9 +890,38 @@ __HUBSPOT_TRACKING__
     )
 
 
+def render_admin_login(section: str = "magazine", error: str = "") -> HTMLResponse:
+    selected_section = normalize_flipbook_type(section)
+    error_markup = f'<p class="error">{html.escape(error)}</p>' if error else ""
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flipbook Admin Login</title>
+<style>
+:root{{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--ink:#303052;--muted:#4f5e68;--line:#dde5ea;--brand:#25b783;--danger:#b42318}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif;display:grid;place-items:center;padding:22px}}main{{width:min(420px,100%);border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:22px}}h1{{margin:0 0 10px;font-size:30px;line-height:1.1;letter-spacing:0}}p{{margin:0 0 18px;color:var(--muted);line-height:1.45}}label{{display:grid;gap:6px;color:var(--muted);font-size:13px;font-weight:800}}input{{width:100%;min-height:42px;border:1px solid var(--line);border-radius:6px;padding:9px;color:var(--ink);font:inherit}}button{{width:100%;min-height:42px;margin-top:14px;border:1px solid var(--brand);border-radius:6px;background:var(--brand);color:#06120d;font:inherit;font-weight:900;cursor:pointer}}.error{{color:var(--danger);font-weight:800}}
+</style>
+</head>
+<body>
+<main>
+<h1>Flipbook Admin</h1>
+<p>Enter the admin password to manage flipbooks.</p>
+{error_markup}
+<form method="post" action="/admin/login">
+<input type="hidden" name="section" value="{html.escape(selected_section)}">
+<label>Password<input name="password" type="password" autocomplete="current-password" autofocus required></label>
+<button type="submit">Enter Admin</button>
+</form>
+</main>
+</body>
+</html>"""
+    )
+
+
 def render_admin_view(
     publications: list[dict[str, str]],
-    admin_token: str,
     section: str = "magazine",
 ) -> HTMLResponse:
     selected_section = normalize_flipbook_type(section)
@@ -932,10 +968,9 @@ def render_admin_view(
         if len(event_rows) >= 50:
             break
     event_markup = "".join(event_rows) if event_rows else f'<p class="empty">No {html.escape(section_label.lower())} archive changes have been recorded yet.</p>'
-    admin_token_json = json.dumps(admin_token)
     section_json = json.dumps(selected_section)
-    magazine_href = f"/admin?admin_token={html.escape(admin_token)}&section=magazine"
-    ebook_href = f"/admin?admin_token={html.escape(admin_token)}&section=ebook"
+    magazine_href = "/admin?section=magazine"
+    ebook_href = "/admin?section=ebook"
     magazine_active = " active" if selected_section == "magazine" else ""
     ebook_active = " active" if selected_section == "ebook" else ""
     template = """<!doctype html>
@@ -945,7 +980,7 @@ def render_admin_view(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flipbook Admin</title>
 <style>
-:root{color-scheme:dark;--bg:#0e141b;--panel:#141d27;--panel-strong:#1d2935;--ink:#edf5f0;--muted:#a8b8b1;--line:#344351;--brand:#29b17d;--danger:#c84d4d}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{width:min(1280px,100%);margin:0 auto;padding:22px}h1{margin:0 0 14px;font-size:32px;line-height:1.1;letter-spacing:0}.section-switch{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 18px}.section-switch a{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;text-decoration:none;display:inline-flex;align-items:center;padding:0 12px}.section-switch a:hover,.section-switch a:focus-visible{border-color:var(--brand);outline:0}.section-switch a.active{background:var(--brand);border-color:var(--brand);color:#06120d}.actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-width:0}h2{margin:0 0 12px;font-size:16px;letter-spacing:0}label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:700}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f151d;color:var(--ink);padding:9px}textarea{min-height:72px;resize:vertical}button{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;cursor:pointer;padding:0 12px}button:hover,button:focus-visible{border-color:var(--brand);outline:0}button:disabled{cursor:not-allowed;opacity:.45}button.primary{background:var(--brand);border-color:var(--brand);color:#06120d}button.danger{background:#2c1719;border-color:#683137;color:#ffdcdc}.form-grid{display:grid;gap:10px}.status{position:sticky;top:0;z-index:2;margin-bottom:14px;border:1px solid var(--line);background:#101820;border-radius:8px;padding:10px;color:var(--muted);font-size:14px}.admin-content{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,340px);align-items:start;gap:18px}.list-tools{display:flex;justify-content:flex-end;margin:0 0 10px}.publication-list{display:grid;gap:10px}.publication-row{display:grid;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px}.select-target{grid-template-columns:auto 56px minmax(0,1fr);align-items:center;gap:10px;color:var(--ink);font-size:14px}.select-target input{width:18px;height:18px}.cover{width:56px;aspect-ratio:648/783;border:1px solid var(--line);border-radius:4px;background:#202a35;display:grid;place-items:center;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.cover img{width:100%;height:100%;object-fit:cover;display:block}.publication-copy{display:grid;gap:4px;min-width:0}.publication-copy strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.publication-copy span{color:var(--muted);font-size:12px}.empty{color:var(--muted)}@media(max-width:860px){.actions{grid-template-columns:1fr}.admin-content{grid-template-columns:1fr}}
+:root{color-scheme:dark;--bg:#0e141b;--panel:#141d27;--panel-strong:#1d2935;--ink:#edf5f0;--muted:#a8b8b1;--line:#344351;--brand:#29b17d;--danger:#c84d4d}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{width:min(1280px,100%);margin:0 auto;padding:22px}h1{margin:0 0 14px;font-size:32px;line-height:1.1;letter-spacing:0}.section-switch{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 18px}.section-switch a{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;text-decoration:none;display:inline-flex;align-items:center;padding:0 12px}.section-switch a:hover,.section-switch a:focus-visible{border-color:var(--brand);outline:0}.section-switch a.active{background:var(--brand);border-color:var(--brand);color:#06120d}.logout-form{margin-left:auto}.logout-form button{background:transparent}.actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-width:0}h2{margin:0 0 12px;font-size:16px;letter-spacing:0}label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:700}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f151d;color:var(--ink);padding:9px}textarea{min-height:72px;resize:vertical}button{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;cursor:pointer;padding:0 12px}button:hover,button:focus-visible{border-color:var(--brand);outline:0}button:disabled{cursor:not-allowed;opacity:.45}button.primary{background:var(--brand);border-color:var(--brand);color:#06120d}button.danger{background:#2c1719;border-color:#683137;color:#ffdcdc}.form-grid{display:grid;gap:10px}.status{position:sticky;top:0;z-index:2;margin-bottom:14px;border:1px solid var(--line);background:#101820;border-radius:8px;padding:10px;color:var(--muted);font-size:14px}.admin-content{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,340px);align-items:start;gap:18px}.list-tools{display:flex;justify-content:flex-end;margin:0 0 10px}.publication-list{display:grid;gap:10px}.publication-row{display:grid;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px}.select-target{grid-template-columns:auto 56px minmax(0,1fr);align-items:center;gap:10px;color:var(--ink);font-size:14px}.select-target input{width:18px;height:18px}.cover{width:56px;aspect-ratio:648/783;border:1px solid var(--line);border-radius:4px;background:#202a35;display:grid;place-items:center;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.cover img{width:100%;height:100%;object-fit:cover;display:block}.publication-copy{display:grid;gap:4px;min-width:0}.publication-copy strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.publication-copy span{color:var(--muted);font-size:12px}.empty{color:var(--muted)}@media(max-width:860px){.actions{grid-template-columns:1fr}.admin-content{grid-template-columns:1fr}.logout-form{margin-left:0}}
 section.event-tracking{position:sticky;top:68px;max-height:calc(100vh - 90px);overflow:auto}.event-list{display:grid;gap:8px}.event-row{display:grid;gap:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px}.event-row div{display:grid;gap:3px;min-width:0}.event-row strong,.event-row b{font-size:14px;color:var(--ink)}.event-row span{color:var(--muted);font-size:12px;line-height:1.35}.event-notes{font-style:italic}@media(max-width:860px){section.event-tracking{position:static;max-height:none}}
 body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:#eef7f4;--ink:#303052;--muted:#4f5e68;--line:#dde5ea;--brand:#25b783;--danger:#b42318}body.admin-light input,body.admin-light select,body.admin-light textarea{background:#ffffff;color:var(--ink)}body.admin-light .status{background:#f8fbfa;color:var(--muted)}body.admin-light button.danger{background:#fff4f3;border-color:#dc8b84;color:#9f1f17}body.admin-light .cover{background:#f4f7f8}body.admin-light input::file-selector-button{background:#eef2f4;color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:6px 10px;font-weight:800}
 </style>
@@ -953,7 +988,7 @@ body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:
 <body class="admin-light">
 <main>
 <h1>Flipbook Admin</h1>
-<nav class="section-switch" aria-label="Admin section switch"><a class="__MAGAZINE_ACTIVE__" href="__MAGAZINE_HREF__">Manage Magazines</a><a class="__EBOOK_ACTIVE__" href="__EBOOK_HREF__">Manage Ebooks</a></nav>
+<nav class="section-switch" aria-label="Admin section switch"><a class="__MAGAZINE_ACTIVE__" href="__MAGAZINE_HREF__">Manage Magazines</a><a class="__EBOOK_ACTIVE__" href="__EBOOK_HREF__">Manage Ebooks</a><form class="logout-form" method="post" action="/admin/logout"><button type="submit">Log Out</button></form></nav>
 <div class="status" id="status">Ready.</div>
 <section class="actions" aria-label="Flipbook actions">
 <form class="panel form-grid" id="uploadForm">
@@ -994,7 +1029,7 @@ __EVENT_ROWS__
 </section>
 </main>
 <script>
-const adminToken=__ADMIN_TOKEN__;const currentSection=__SECTION_JSON__;const statusEl=document.getElementById('status');const deselectBtn=document.getElementById('deselectBtn');const today=new Date().toISOString().slice(0,10);document.querySelectorAll('input[type=date]').forEach((input)=>{if(!input.value)input.value=today});function setStatus(message){statusEl.textContent=message}function selectedInput(){return document.querySelector('input[name=selectedSlug]:checked')}function selectedSlug(){return selectedInput()?.value||''}function selectedTitle(){return selectedInput()?.closest('.publication-row')?.querySelector('.publication-copy strong')?.textContent||selectedSlug()}function updateDeselectState(){deselectBtn.disabled=!selectedSlug()}function withToken(formData){formData.append('admin_token',adminToken);return formData}async function readJson(response){const data=await response.json().catch(()=>({detail:'Request failed.'}));if(!response.ok)throw new Error(data.detail||'Request failed.');return data}async function processPublication(slug,pageCount){let start=1;while(start<=pageCount){setStatus('Processing '+slug+' page '+start+' of '+pageCount+'...');const formData=withToken(new FormData());const response=await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/process-batch?start_page='+start+'&limit=5',{method:'POST',body:formData});const data=await readJson(response);if(Number(data.rendered_total)>=Number(data.page_count)){setStatus('Processed '+slug+'.');return data}start=Number(data.next_start_page||data.rendered_total+1)}}document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>input.addEventListener('change',updateDeselectState));deselectBtn.addEventListener('click',()=>{document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>{input.checked=false});updateDeselectState();setStatus('Selection cleared.')});updateDeselectState();document.getElementById('uploadForm').addEventListener('submit',async(event)=>{event.preventDefault();try{setStatus('Uploading new '+currentSection+' flipbook...');const data=await readJson(await fetch('/admin/api/publications/upload',{method:'POST',body:withToken(new FormData(event.currentTarget))}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('replaceForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to replace.');return}try{setStatus('Replacing '+slug+'...');const data=await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/replace',{method:'POST',body:withToken(new FormData(event.currentTarget))}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('deleteForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to delete.');return}const title=selectedTitle();const confirmed=confirm('Are you sure?\\n\\nThis will delete \"'+title+'\" from the archive and remove its stored PDF, page images, thumbnails, and manifest.\\n\\nClick OK to permanently delete it.');if(!confirmed)return;try{setStatus('Deleting '+slug+'...');await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/delete',{method:'POST',body:withToken(new FormData())}));window.location.reload()}catch(error){setStatus(error.message)}});
+const currentSection=__SECTION_JSON__;const statusEl=document.getElementById('status');const deselectBtn=document.getElementById('deselectBtn');const today=new Date().toISOString().slice(0,10);document.querySelectorAll('input[type=date]').forEach((input)=>{if(!input.value)input.value=today});function setStatus(message){statusEl.textContent=message}function selectedInput(){return document.querySelector('input[name=selectedSlug]:checked')}function selectedSlug(){return selectedInput()?.value||''}function selectedTitle(){return selectedInput()?.closest('.publication-row')?.querySelector('.publication-copy strong')?.textContent||selectedSlug()}function updateDeselectState(){deselectBtn.disabled=!selectedSlug()}async function readJson(response){const data=await response.json().catch(()=>({detail:'Request failed.'}));if(!response.ok)throw new Error(data.detail||'Request failed.');return data}async function processPublication(slug,pageCount){let start=1;while(start<=pageCount){setStatus('Processing '+slug+' page '+start+' of '+pageCount+'...');const response=await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/process-batch?start_page='+start+'&limit=5',{method:'POST',body:new FormData()});const data=await readJson(response);if(Number(data.rendered_total)>=Number(data.page_count)){setStatus('Processed '+slug+'.');return data}start=Number(data.next_start_page||data.rendered_total+1)}}document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>input.addEventListener('change',updateDeselectState));deselectBtn.addEventListener('click',()=>{document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>{input.checked=false});updateDeselectState();setStatus('Selection cleared.')});updateDeselectState();document.getElementById('uploadForm').addEventListener('submit',async(event)=>{event.preventDefault();try{setStatus('Uploading new '+currentSection+' flipbook...');const data=await readJson(await fetch('/admin/api/publications/upload',{method:'POST',body:new FormData(event.currentTarget)}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('replaceForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to replace.');return}try{setStatus('Replacing '+slug+'...');const data=await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/replace',{method:'POST',body:new FormData(event.currentTarget)}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('deleteForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to delete.');return}const title=selectedTitle();const confirmed=confirm('Are you sure?\\n\\nThis will delete \"'+title+'\" from the archive and remove its stored PDF, page images, thumbnails, and manifest.\\n\\nClick OK to permanently delete it.');if(!confirmed)return;try{setStatus('Deleting '+slug+'...');await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/delete',{method:'POST',body:new FormData()}));window.location.reload()}catch(error){setStatus(error.message)}});
 </script>
 </body>
 </html>"""
@@ -1002,7 +1037,6 @@ const adminToken=__ADMIN_TOKEN__;const currentSection=__SECTION_JSON__;const sta
         content=template
         .replace("__ROWS__", row_markup)
         .replace("__EVENT_ROWS__", event_markup)
-        .replace("__ADMIN_TOKEN__", admin_token_json)
         .replace("__SECTION_JSON__", section_json)
         .replace("__SECTION__", selected_section)
         .replace("__SECTION_LABEL__", section_label)
@@ -1101,11 +1135,41 @@ def read_ebooks_embed() -> HTMLResponse:
 
 @app.get("/admin", response_class=HTMLResponse)
 def read_admin(
-    admin_token: str | None = Query(default=None),
+    request: Request,
     section: str = Query(default="magazine"),
 ) -> HTMLResponse:
-    require_admin_token(admin_token)
-    return render_admin_view(list_publications(), admin_token or "", section=section)
+    try:
+        require_admin_request(request)
+    except HTTPException:
+        return render_admin_login(section=section)
+    return render_admin_view(list_publications(), section=section)
+
+
+@app.post("/admin/login")
+def login_admin(
+    password: str = Form(...),
+    section: str = Form(default="magazine"),
+) -> RedirectResponse | HTMLResponse:
+    selected_section = normalize_flipbook_type(section)
+    if not secrets.compare_digest(password, get_admin_password()):
+        return render_admin_login(section=selected_section, error="Incorrect password.")
+    response = RedirectResponse(url=f"/admin?section={selected_section}", status_code=303)
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        admin_session_value(),
+        httponly=True,
+        secure=True,
+        samesite="none",
+        max_age=60 * 60 * 12,
+    )
+    return response
+
+
+@app.post("/admin/logout")
+def logout_admin() -> RedirectResponse:
+    response = RedirectResponse(url="/admin", status_code=303)
+    response.delete_cookie(ADMIN_SESSION_COOKIE, secure=True, samesite="none")
+    return response
 
 
 @app.get("/api/publications")
@@ -1194,14 +1258,14 @@ def upload_publication_pdf(
 
 @app.post("/admin/api/publications/upload")
 def admin_upload_publication_pdf(
-    admin_token: str | None = Form(default=None),
+    request: Request,
     file: UploadFile = File(...),
     issue_title: str | None = Form(default=None),
     upload_date: str | None = Form(default=None),
     version_notes: str | None = Form(default=None),
     flipbook_type: str | None = Form(default="magazine"),
 ) -> dict[str, Any]:
-    require_admin_token(admin_token)
+    require_admin_request(request)
     filename_stem = Path(file.filename or "").stem
     title = (issue_title or filename_stem).strip()
     slug = unique_slug(slugify(title))
@@ -1229,12 +1293,12 @@ def admin_upload_publication_pdf(
 @app.post("/admin/api/publications/{slug}/replace")
 def admin_replace_publication_pdf(
     slug: str,
-    admin_token: str | None = Form(default=None),
+    request: Request,
     file: UploadFile = File(...),
     upload_date: str | None = Form(default=None),
     version_notes: str | None = Form(default=None),
 ) -> dict[str, Any]:
-    require_admin_token(admin_token)
+    require_admin_request(request)
     normalized_slug = validate_slug(slug)
     existing_manifest = read_manifest(normalized_slug)
     title = str(existing_manifest.get("title") or normalized_slug.replace("-", " ").title())
@@ -1262,10 +1326,10 @@ def admin_replace_publication_pdf(
 @app.post("/admin/api/publications/{slug}/type")
 def admin_update_publication_type(
     slug: str,
-    admin_token: str | None = Form(default=None),
+    request: Request,
     flipbook_type: str | None = Form(default=None),
 ) -> dict[str, Any]:
-    require_admin_token(admin_token)
+    require_admin_request(request)
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
     manifest["flipbook_type"] = normalize_flipbook_type(flipbook_type)
@@ -1289,11 +1353,11 @@ def admin_update_publication_type(
 @app.post("/admin/api/publications/{slug}/metadata")
 def admin_update_publication_metadata(
     slug: str,
-    admin_token: str | None = Form(default=None),
+    request: Request,
     interactive_url: str | None = Form(default=None),
     source_url: str | None = Form(default=None),
 ) -> dict[str, Any]:
-    require_admin_token(admin_token)
+    require_admin_request(request)
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
 
@@ -1329,9 +1393,9 @@ def admin_update_publication_metadata(
 @app.post("/admin/api/publications/{slug}/delete")
 def admin_delete_publication(
     slug: str,
-    admin_token: str | None = Form(default=None),
+    request: Request,
 ) -> dict[str, str]:
-    require_admin_token(admin_token)
+    require_admin_request(request)
     normalized_slug = validate_slug(slug)
     target_dir = publication_dir(normalized_slug)
     if not target_dir.exists():
@@ -1350,11 +1414,11 @@ def admin_delete_publication(
 @app.post("/admin/api/publications/{slug}/process-batch")
 def admin_process_publication_pdf_batch(
     slug: str,
-    admin_token: str | None = Form(default=None),
+    request: Request,
     start_page: int = Query(default=1, ge=1),
     limit: int = Query(default=5, ge=1, le=10),
 ) -> dict[str, Any]:
-    require_admin_token(admin_token)
+    require_admin_request(request)
     return process_publication_batch(slug, start_page, limit)
 
 
