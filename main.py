@@ -917,7 +917,9 @@ def render_admin_view(
         "deleted": "Existing flipbook deleted",
     }
     event_rows = []
-    for event in read_event_log()[:50]:
+    for event in read_event_log():
+        if normalize_flipbook_type(str(event.get("flipbook_type") or "magazine")) != selected_section:
+            continue
         event_action = html.escape(action_labels.get(str(event.get("action") or ""), str(event.get("action") or "Change")))
         event_time = html.escape(str(event.get("timestamp") or ""))
         event_title = html.escape(str(event.get("title") or event.get("slug") or "Untitled flipbook"))
@@ -927,7 +929,9 @@ def render_admin_view(
         event_rows.append(
             f"""<article class="event-row"><div><strong>{event_action}</strong><span>{event_time} · {event_type}</span></div><div><b>{event_title}</b>{notes_markup}</div></article>"""
         )
-    event_markup = "".join(event_rows) if event_rows else '<p class="empty">No archive changes have been recorded yet.</p>'
+        if len(event_rows) >= 50:
+            break
+    event_markup = "".join(event_rows) if event_rows else f'<p class="empty">No {html.escape(section_label.lower())} archive changes have been recorded yet.</p>'
     admin_token_json = json.dumps(admin_token)
     section_json = json.dumps(selected_section)
     magazine_href = f"/admin?admin_token={html.escape(admin_token)}&section=magazine"
@@ -941,8 +945,8 @@ def render_admin_view(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flipbook Admin</title>
 <style>
-:root{color-scheme:dark;--bg:#0e141b;--panel:#141d27;--panel-strong:#1d2935;--ink:#edf5f0;--muted:#a8b8b1;--line:#344351;--brand:#29b17d;--danger:#c84d4d}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{width:min(1040px,100%);margin:0 auto;padding:22px}h1{margin:0 0 14px;font-size:32px;line-height:1.1;letter-spacing:0}.section-switch{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 18px}.section-switch a{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;text-decoration:none;display:inline-flex;align-items:center;padding:0 12px}.section-switch a:hover,.section-switch a:focus-visible{border-color:var(--brand);outline:0}.section-switch a.active{background:var(--brand);border-color:var(--brand);color:#06120d}.actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-width:0}h2{margin:0 0 12px;font-size:16px;letter-spacing:0}label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:700}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f151d;color:var(--ink);padding:9px}textarea{min-height:72px;resize:vertical}button{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;cursor:pointer;padding:0 12px}button:hover,button:focus-visible{border-color:var(--brand);outline:0}button:disabled{cursor:not-allowed;opacity:.45}button.primary{background:var(--brand);border-color:var(--brand);color:#06120d}button.danger{background:#2c1719;border-color:#683137;color:#ffdcdc}.form-grid{display:grid;gap:10px}.status{position:sticky;top:0;z-index:2;margin-bottom:14px;border:1px solid var(--line);background:#101820;border-radius:8px;padding:10px;color:var(--muted);font-size:14px}.list-tools{display:flex;justify-content:flex-end;margin:0 0 10px}.publication-list{display:grid;gap:10px}.publication-row{display:grid;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px}.select-target{grid-template-columns:auto 56px minmax(0,1fr);align-items:center;gap:10px;color:var(--ink);font-size:14px}.select-target input{width:18px;height:18px}.cover{width:56px;aspect-ratio:648/783;border:1px solid var(--line);border-radius:4px;background:#202a35;display:grid;place-items:center;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.cover img{width:100%;height:100%;object-fit:cover;display:block}.publication-copy{display:grid;gap:4px;min-width:0}.publication-copy strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.publication-copy span{color:var(--muted);font-size:12px}.empty{color:var(--muted)}@media(max-width:860px){.actions{grid-template-columns:1fr}}
-section.event-tracking{margin:0 0 18px}.event-list{display:grid;gap:8px}.event-row{display:grid;grid-template-columns:minmax(220px,.75fr) minmax(0,1.25fr);gap:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px}.event-row div{display:grid;gap:3px;min-width:0}.event-row strong,.event-row b{font-size:14px;color:var(--ink)}.event-row span{color:var(--muted);font-size:12px;line-height:1.35}.event-notes{font-style:italic}@media(max-width:700px){.event-row{grid-template-columns:1fr}}
+:root{color-scheme:dark;--bg:#0e141b;--panel:#141d27;--panel-strong:#1d2935;--ink:#edf5f0;--muted:#a8b8b1;--line:#344351;--brand:#29b17d;--danger:#c84d4d}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{width:min(1280px,100%);margin:0 auto;padding:22px}h1{margin:0 0 14px;font-size:32px;line-height:1.1;letter-spacing:0}.section-switch{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 18px}.section-switch a{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;text-decoration:none;display:inline-flex;align-items:center;padding:0 12px}.section-switch a:hover,.section-switch a:focus-visible{border-color:var(--brand);outline:0}.section-switch a.active{background:var(--brand);border-color:var(--brand);color:#06120d}.actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-width:0}h2{margin:0 0 12px;font-size:16px;letter-spacing:0}label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:700}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f151d;color:var(--ink);padding:9px}textarea{min-height:72px;resize:vertical}button{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;cursor:pointer;padding:0 12px}button:hover,button:focus-visible{border-color:var(--brand);outline:0}button:disabled{cursor:not-allowed;opacity:.45}button.primary{background:var(--brand);border-color:var(--brand);color:#06120d}button.danger{background:#2c1719;border-color:#683137;color:#ffdcdc}.form-grid{display:grid;gap:10px}.status{position:sticky;top:0;z-index:2;margin-bottom:14px;border:1px solid var(--line);background:#101820;border-radius:8px;padding:10px;color:var(--muted);font-size:14px}.admin-content{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,340px);align-items:start;gap:18px}.list-tools{display:flex;justify-content:flex-end;margin:0 0 10px}.publication-list{display:grid;gap:10px}.publication-row{display:grid;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px}.select-target{grid-template-columns:auto 56px minmax(0,1fr);align-items:center;gap:10px;color:var(--ink);font-size:14px}.select-target input{width:18px;height:18px}.cover{width:56px;aspect-ratio:648/783;border:1px solid var(--line);border-radius:4px;background:#202a35;display:grid;place-items:center;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.cover img{width:100%;height:100%;object-fit:cover;display:block}.publication-copy{display:grid;gap:4px;min-width:0}.publication-copy strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.publication-copy span{color:var(--muted);font-size:12px}.empty{color:var(--muted)}@media(max-width:860px){.actions{grid-template-columns:1fr}.admin-content{grid-template-columns:1fr}}
+section.event-tracking{position:sticky;top:68px;max-height:calc(100vh - 90px);overflow:auto}.event-list{display:grid;gap:8px}.event-row{display:grid;gap:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px}.event-row div{display:grid;gap:3px;min-width:0}.event-row strong,.event-row b{font-size:14px;color:var(--ink)}.event-row span{color:var(--muted);font-size:12px;line-height:1.35}.event-notes{font-style:italic}@media(max-width:860px){section.event-tracking{position:static;max-height:none}}
 body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:#eef7f4;--ink:#303052;--muted:#4f5e68;--line:#dde5ea;--brand:#25b783;--danger:#b42318}body.admin-light input,body.admin-light select,body.admin-light textarea{background:#ffffff;color:var(--ink)}body.admin-light .status{background:#f8fbfa;color:var(--muted)}body.admin-light button.danger{background:#fff4f3;border-color:#dc8b84;color:#9f1f17}body.admin-light .cover{background:#f4f7f8}body.admin-light input::file-selector-button{background:#eef2f4;color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:6px 10px;font-weight:800}
 </style>
 </head>
@@ -974,15 +978,19 @@ body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:
 <button class="danger" type="submit">Delete Selected</button>
 </form>
 </section>
-<section class="panel event-tracking" aria-label="Event tracking">
-<h2>Event Tracking</h2>
-<div class="event-list">
-__EVENT_ROWS__
-</div>
-</section>
+<section class="admin-content">
+<div>
 <div class="list-tools"><button type="button" id="deselectBtn" disabled>Deselect</button></div>
 <section class="publication-list" aria-label="Existing flipbooks">
 __ROWS__
+</section>
+</div>
+<aside class="panel event-tracking" aria-label="Event tracking">
+<h2>__SECTION_LABEL__ Event Tracking</h2>
+<div class="event-list">
+__EVENT_ROWS__
+</div>
+</aside>
 </section>
 </main>
 <script>
