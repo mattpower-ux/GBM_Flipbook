@@ -27,6 +27,37 @@ VALID_FLIPBOOK_TYPES = {"magazine": "Magazine", "ebook": "Ebook"}
 ADMIN_PASSWORD_ENV = "FLIPBOOK_ADMIN_PASSWORD"
 DEFAULT_ADMIN_PASSWORD = "1313"
 ADMIN_SESSION_COOKIE = "flipbook_admin_session"
+BASELINE_VIEW_COUNTS = {
+    "green-builder-q3-2026": 154,
+    "green-builder-may-jun-2026": 270,
+    "green-builder-mar-apr-2026": 1055,
+    "green-builder-jan-feb-2026": 1075,
+    "green-builder-nov-dec-2025": 234,
+    "green-builder-sep-oct-2025": 380,
+    "green-builder-jul-aug-2025": 398,
+    "green-builder-may-jun-2025": 358,
+    "green-builder-mar-apr-2025": 605,
+    "green-builder-jan-feb-2025": 1288,
+    "green-builder-nov-dec-2024": 441,
+    "green-builder-jul-aug-2024": 561,
+    "green-builder-sep-oct-2024": 389,
+    "green-builder-may-jun-2024": 372,
+    "green-builder-mar-apr-2024": 2176,
+    "green-builder-jan-feb-2024": 1036,
+    "green-builder-nov-dec-2023": 446,
+    "green-builder-sep-oct-2023": 416,
+    "green-builder-jul-aug-2023": 742,
+    "green-builder-may-jun-2023": 366,
+    "green-builder-jan-feb-2023": 1340,
+    "green-builder-mar-apr-2023": 2284,
+    "green-builder-nov-dec-2022": 436,
+    "green-builder-sep-oct-2022": 720,
+    "green-builder-jul-aug-2022": 967,
+    "2025-homeowner-s-handbook": 365,
+    "homeowners-handbook-of-green-building-remodeling-v1": 365,
+    "gbm-remodeling-field-report": 45,
+    "outdoor-living-guide": 59,
+}
 MAGAZINE_SUBSCRIPTION_URL = "https://app.hubspot.com/payments/RyZtj5CYSiem?referrer=PAYMENT_LINK"
 EDITOR_EMAIL = "matt.power@greenbuildermedia.com"
 HUBSPOT_PORTAL_ID = "309276"
@@ -102,6 +133,42 @@ def normalize_flipbook_type(value: str | None) -> str:
 
 def flipbook_type_label(value: str | None) -> str:
     return VALID_FLIPBOOK_TYPES[normalize_flipbook_type(value)]
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        parsed = int(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return default
+    return max(0, parsed)
+
+
+def baseline_view_count(slug: str) -> int:
+    try:
+        normalized_slug = validate_slug(slug)
+    except HTTPException:
+        return 0
+    return BASELINE_VIEW_COUNTS.get(normalized_slug, 0)
+
+
+def publication_view_count(manifest: dict[str, Any]) -> int:
+    slug = str(manifest.get("slug") or "")
+    current_views = safe_int(manifest.get("view_count"), 0)
+    if slug:
+        current_views = max(current_views, baseline_view_count(slug))
+    return current_views
+
+
+def increment_publication_view_count(slug: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    normalized_slug = validate_slug(slug)
+    manifest["view_count"] = max(publication_view_count(manifest), baseline_view_count(normalized_slug)) + 1
+    manifest["last_viewed_at"] = now_iso()
+    write_manifest(normalized_slug, manifest)
+    return manifest
+
+
+def format_count(value: Any) -> str:
+    return f"{safe_int(value):,}"
 
 
 def get_admin_password() -> str:
@@ -635,6 +702,14 @@ def save_publication_upload(
     version_notes: str | None = None,
 ) -> dict[str, Any]:
     normalized_slug = validate_slug(slug)
+    existing_view_count = 0
+    existing_manifest_path = manifest_path(normalized_slug)
+    if existing_manifest_path.exists():
+        try:
+            with existing_manifest_path.open("r", encoding="utf-8") as existing_manifest_file:
+                existing_view_count = publication_view_count(json.load(existing_manifest_file))
+        except (OSError, json.JSONDecodeError):
+            existing_view_count = 0
     filename = file.filename or ""
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Upload must be a PDF file.")
@@ -662,6 +737,8 @@ def save_publication_upload(
         "publication_date": publication_date or upload_date or "",
         "upload_date": upload_date or timestamp[:10],
         "version_notes": version_notes or "",
+        "view_count": max(existing_view_count, baseline_view_count(normalized_slug)),
+        "last_viewed_at": None,
         "source_url": source_url or "",
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -743,6 +820,7 @@ def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
         "upload_date": str(manifest.get("upload_date") or "")[:10],
         "version_notes": str(manifest.get("version_notes") or ""),
         "interactive_url": external_url(manifest.get("interactive_url")),
+        "view_count": str(publication_view_count(manifest)),
     }
 
 
@@ -938,13 +1016,14 @@ def render_admin_view(
         date = html.escape(publication["date"])
         status = html.escape(publication["status"])
         cover_url = html.escape(publication["cover_url"])
+        view_count = html.escape(format_count(publication.get("view_count")))
         cover = (
             f'<img src="{cover_url}" alt="{title} cover">'
             if cover_url
             else '<span class="cover-placeholder">No cover</span>'
         )
         rows.append(
-            f"""<article class="publication-row"><label class="select-target"><input type="radio" name="selectedSlug" value="{slug}"><span class="cover">{cover}</span><span class="publication-copy"><strong>{title}</strong><span>{date} · {status}</span></span></label></article>"""
+            f"""<article class="publication-row"><label class="select-target"><input type="radio" name="selectedSlug" value="{slug}"><span class="cover">{cover}</span><span class="publication-copy"><strong>{title}</strong><span>{date} · {status}</span></span></label><span class="views-count">{view_count}</span></article>"""
         )
     row_markup = "".join(rows) if rows else f'<p class="empty">No {html.escape(section_label.lower())} flipbooks have been uploaded yet.</p>'
     action_labels = {
@@ -980,7 +1059,7 @@ def render_admin_view(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flipbook Admin</title>
 <style>
-:root{color-scheme:dark;--bg:#0e141b;--panel:#141d27;--panel-strong:#1d2935;--ink:#edf5f0;--muted:#a8b8b1;--line:#344351;--brand:#29b17d;--danger:#c84d4d}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{width:min(1280px,100%);margin:0 auto;padding:22px}h1{margin:0 0 14px;font-size:32px;line-height:1.1;letter-spacing:0}.section-switch{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 18px}.section-switch a{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;text-decoration:none;display:inline-flex;align-items:center;padding:0 12px}.section-switch a:hover,.section-switch a:focus-visible{border-color:var(--brand);outline:0}.section-switch a.active{background:var(--brand);border-color:var(--brand);color:#06120d}.logout-form{margin-left:auto}.logout-form button{background:transparent}.actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-width:0}h2{margin:0 0 12px;font-size:16px;letter-spacing:0}label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:700}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f151d;color:var(--ink);padding:9px}textarea{min-height:72px;resize:vertical}button{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;cursor:pointer;padding:0 12px}button:hover,button:focus-visible{border-color:var(--brand);outline:0}button:disabled{cursor:not-allowed;opacity:.45}button.primary{background:var(--brand);border-color:var(--brand);color:#06120d}button.danger{background:#2c1719;border-color:#683137;color:#ffdcdc}.form-grid{display:grid;gap:10px}.status{position:sticky;top:0;z-index:2;margin-bottom:14px;border:1px solid var(--line);background:#101820;border-radius:8px;padding:10px;color:var(--muted);font-size:14px}.admin-content{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,340px);align-items:start;gap:18px}.list-tools{display:flex;justify-content:flex-end;margin:0 0 10px}.publication-list{display:grid;gap:10px}.publication-row{display:grid;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px}.select-target{grid-template-columns:auto 56px minmax(0,1fr);align-items:center;gap:10px;color:var(--ink);font-size:14px}.select-target input{width:18px;height:18px}.cover{width:56px;aspect-ratio:648/783;border:1px solid var(--line);border-radius:4px;background:#202a35;display:grid;place-items:center;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.cover img{width:100%;height:100%;object-fit:cover;display:block}.publication-copy{display:grid;gap:4px;min-width:0}.publication-copy strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.publication-copy span{color:var(--muted);font-size:12px}.empty{color:var(--muted)}@media(max-width:860px){.actions{grid-template-columns:1fr}.admin-content{grid-template-columns:1fr}.logout-form{margin-left:0}}
+:root{color-scheme:dark;--bg:#0e141b;--panel:#141d27;--panel-strong:#1d2935;--ink:#edf5f0;--muted:#a8b8b1;--line:#344351;--brand:#29b17d;--danger:#c84d4d}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{width:min(1280px,100%);margin:0 auto;padding:22px}h1{margin:0 0 14px;font-size:32px;line-height:1.1;letter-spacing:0}.section-switch{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 18px}.section-switch a{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;text-decoration:none;display:inline-flex;align-items:center;padding:0 12px}.section-switch a:hover,.section-switch a:focus-visible{border-color:var(--brand);outline:0}.section-switch a.active{background:var(--brand);border-color:var(--brand);color:#06120d}.logout-form{margin-left:auto}.logout-form button{background:transparent}.actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-width:0}h2{margin:0 0 12px;font-size:16px;letter-spacing:0}label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:700}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f151d;color:var(--ink);padding:9px}textarea{min-height:72px;resize:vertical}button{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;cursor:pointer;padding:0 12px}button:hover,button:focus-visible{border-color:var(--brand);outline:0}button:disabled{cursor:not-allowed;opacity:.45}button.primary{background:var(--brand);border-color:var(--brand);color:#06120d}button.danger{background:#2c1719;border-color:#683137;color:#ffdcdc}.form-grid{display:grid;gap:10px}.status{position:sticky;top:0;z-index:2;margin-bottom:14px;border:1px solid var(--line);background:#101820;border-radius:8px;padding:10px;color:var(--muted);font-size:14px}.admin-content{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,340px);align-items:start;gap:18px}.list-tools{display:flex;justify-content:flex-end;margin:0 0 10px}.publication-list-header{display:grid;grid-template-columns:minmax(0,1fr) 90px;gap:12px;padding:0 14px 8px;color:var(--muted);font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:0}.publication-list-header span:last-child{text-align:right}.publication-list{display:grid;gap:10px}.publication-row{display:grid;grid-template-columns:minmax(0,1fr) 90px;gap:12px;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px}.select-target{grid-template-columns:auto 56px minmax(0,1fr);align-items:center;gap:10px;color:var(--ink);font-size:14px;min-width:0}.select-target input{width:18px;height:18px}.cover{width:56px;aspect-ratio:648/783;border:1px solid var(--line);border-radius:4px;background:#202a35;display:grid;place-items:center;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.cover img{width:100%;height:100%;object-fit:cover;display:block}.publication-copy{display:grid;gap:4px;min-width:0}.publication-copy strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.publication-copy span{color:var(--muted);font-size:12px}.views-count{justify-self:end;color:var(--ink);font-size:15px;font-weight:900;font-variant-numeric:tabular-nums}.empty{color:var(--muted)}@media(max-width:860px){.actions{grid-template-columns:1fr}.admin-content{grid-template-columns:1fr}.logout-form{margin-left:0}.publication-list-header{display:none}.publication-row{grid-template-columns:1fr}.views-count{justify-self:start;margin-left:90px;color:var(--muted)}.views-count::before{content:"Views ";font-weight:700}}
 section.event-tracking{position:sticky;top:68px;max-height:calc(100vh - 90px);overflow:auto}.event-list{display:grid;gap:8px}.event-row{display:grid;gap:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px}.event-row div{display:grid;gap:3px;min-width:0}.event-row strong,.event-row b{font-size:14px;color:var(--ink)}.event-row span{color:var(--muted);font-size:12px;line-height:1.35}.event-notes{font-style:italic}@media(max-width:860px){section.event-tracking{position:static;max-height:none}}
 body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:#eef7f4;--ink:#303052;--muted:#4f5e68;--line:#dde5ea;--brand:#25b783;--danger:#b42318}body.admin-light input,body.admin-light select,body.admin-light textarea{background:#ffffff;color:var(--ink)}body.admin-light .status{background:#f8fbfa;color:var(--muted)}body.admin-light button.danger{background:#fff4f3;border-color:#dc8b84;color:#9f1f17}body.admin-light .cover{background:#f4f7f8}body.admin-light input::file-selector-button{background:#eef2f4;color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:6px 10px;font-weight:800}
 </style>
@@ -1016,6 +1095,7 @@ body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:
 <section class="admin-content">
 <div>
 <div class="list-tools"><button type="button" id="deselectBtn" disabled>Deselect</button></div>
+<div class="publication-list-header" aria-hidden="true"><span>Title</span><span>Views</span></div>
 <section class="publication-list" aria-label="Existing flipbooks">
 __ROWS__
 </section>
@@ -1187,6 +1267,7 @@ def read_book(slug: str) -> HTMLResponse:
         if exc.status_code != 404:
             raise
         return render_missing_book(normalized_slug)
+    manifest = increment_publication_view_count(normalized_slug, manifest)
     return render_book_viewer(manifest)
 
 
