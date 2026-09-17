@@ -1409,7 +1409,7 @@ def refresh_publication_links(slug: str) -> dict[str, Any]:
 
 
 @app.get("/api/publications/{slug}/original.pdf")
-def get_publication_pdf(slug: str) -> FileResponse | RedirectResponse:
+def get_publication_pdf(slug: str) -> Any:
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
     pdf_path = Path(str(manifest.get("original_pdf_path") or ""))
