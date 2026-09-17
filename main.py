@@ -58,6 +58,16 @@ BASELINE_VIEW_COUNTS = {
     "gbm-remodeling-field-report": 45,
     "outdoor-living-guide": 59,
 }
+PUBLICATION_DISPLAY_OVERRIDES = {
+    "green-builder-may-jun-2026": {
+        "title": "Green Builder May/June 2026",
+        "display_date": "May/June 2026",
+    },
+    "green-builder-mar-apr-2026": {
+        "title": "Green Builder March/April 2026",
+        "display_date": "March/April 2026",
+    },
+}
 MAGAZINE_SUBSCRIPTION_URL = "https://app.hubspot.com/payments/RyZtj5CYSiem?referrer=PAYMENT_LINK"
 EDITOR_EMAIL = "matt.power@greenbuildermedia.com"
 HUBSPOT_PORTAL_ID = "309276"
@@ -803,16 +813,19 @@ def hs_manifest_tracking_attrs(manifest: dict[str, Any], action: str) -> str:
 
 def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
     slug = str(manifest.get("slug") or "")
+    display_override = PUBLICATION_DISPLAY_OVERRIDES.get(slug, {})
     pages = manifest.get("pages") or []
     cover_url = ""
     if pages and isinstance(pages[0], dict):
-        cover_url = str(pages[0].get("thumb_url") or pages[0].get("image_url") or "")
+        cover_url = str(pages[0].get("image_url") or pages[0].get("thumb_url") or "")
     flipbook_type = normalize_flipbook_type(str(manifest.get("flipbook_type") or "magazine"))
+    date = publication_date(manifest)
     return {
         "slug": slug,
-        "title": str(manifest.get("title") or slug.replace("-", " ").title()),
+        "title": str(display_override.get("title") or manifest.get("title") or slug.replace("-", " ").title()),
         "description": str(manifest.get("description") or ""),
-        "date": publication_date(manifest),
+        "date": date,
+        "display_date": str(display_override.get("display_date") or date),
         "cover_url": cover_url,
         "status": str(manifest.get("status") or "unknown"),
         "flipbook_type": flipbook_type,
@@ -904,7 +917,7 @@ def render_archive_view(
 
     if remaining_publications:
         cards = "".join(
-            f"""<article class="publication"><a class="cover" href="{book_base_path}/{html.escape(pub['slug'])}" aria-label="Open {html.escape(pub['title'])}" {hs_tracking_attrs(pub, "open")}>{f'<img src="{html.escape(pub["cover_url"])}" alt="{html.escape(pub["title"])} cover" loading="lazy">' if pub['cover_url'] else '<span>No cover</span>'}</a><time>{html.escape(pub['date'])}</time><h3><a href="{book_base_path}/{html.escape(pub['slug'])}" {hs_tracking_attrs(pub, "open")}>{html.escape(pub['title'])}</a></h3>{f'<a class="text-link" href="{html.escape(pub["interactive_url"])}" target="_blank" rel="noopener noreferrer" {hs_tracking_attrs(pub, "interactive")}>Interactive version</a>' if pub.get('interactive_url') else ''}</article>"""
+            f"""<article class="publication"><a class="cover" href="{book_base_path}/{html.escape(pub['slug'])}" aria-label="Open {html.escape(pub['title'])}" {hs_tracking_attrs(pub, "open")}>{f'<img src="{html.escape(pub["cover_url"])}" alt="{html.escape(pub["title"])} cover" loading="lazy">' if pub['cover_url'] else '<span>No cover</span>'}</a><time datetime="{html.escape(pub['date'])}">{html.escape(pub['display_date'])}</time><h3><a href="{book_base_path}/{html.escape(pub['slug'])}" {hs_tracking_attrs(pub, "open")}>{html.escape(pub['title'])}</a></h3>{f'<a class="text-link" href="{html.escape(pub["interactive_url"])}" target="_blank" rel="noopener noreferrer" {hs_tracking_attrs(pub, "interactive")}>Interactive version</a>' if pub.get('interactive_url') else ''}</article>"""
             for pub in remaining_publications
         )
     else:
