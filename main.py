@@ -19,7 +19,7 @@ from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, NumberO
 APP_NAME = "GBM Flipbook"
 DEFAULT_STORAGE_PATH = "/data/flipbooks"
 FALLBACK_STORAGE_PATH = "/tmp/flipbooks"
-PAGE_RENDER_SCALE = 2.0
+PAGE_RENDER_SCALE = float(os.getenv("PAGE_RENDER_SCALE", "1.5"))
 THUMB_RENDER_SCALE = 0.35
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ASSET_FILENAME_PATTERN = re.compile(r"^page-[0-9]{3,5}\.jpg$")
@@ -1211,13 +1211,14 @@ def process_publication_batch(slug: str, start_page: int, limit: int) -> dict[st
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
     pdf_path = Path(manifest["original_pdf_path"])
-    if not manifest.get("links"):
+    if not manifest.get("links") and not manifest.get("link_extraction_checked_at"):
         try:
             manifest = refresh_embedded_links(normalized_slug, manifest)
         except Exception as exc:
             manifest["links"] = []
             manifest["toc_page_number"] = None
             manifest["error"] = f"Embedded link extraction skipped: {exc}"
+        manifest["link_extraction_checked_at"] = now_iso()
     rendered_batch = render_pdf_page_range(normalized_slug, pdf_path, start_page=start_page, limit=limit)
     manifest["page_count"] = rendered_batch["page_count"]
     manifest["pages"] = merge_page_assets(manifest.get("pages") or [], rendered_batch["rendered_pages"])
