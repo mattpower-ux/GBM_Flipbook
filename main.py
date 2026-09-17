@@ -1409,11 +1409,14 @@ def refresh_publication_links(slug: str) -> dict[str, Any]:
 
 
 @app.get("/api/publications/{slug}/original.pdf")
-def get_publication_pdf(slug: str) -> FileResponse:
+def get_publication_pdf(slug: str) -> FileResponse | RedirectResponse:
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
-    pdf_path = Path(manifest["original_pdf_path"])
+    pdf_path = Path(str(manifest.get("original_pdf_path") or ""))
     if not pdf_path.exists():
+        source_url = external_url(manifest.get("source_url"))
+        if source_url:
+            return RedirectResponse(url=source_url, status_code=302)
         raise HTTPException(status_code=404, detail="Original PDF not found.")
     return FileResponse(pdf_path, media_type="application/pdf", filename=f"{normalized_slug}.pdf")
 
@@ -1517,6 +1520,118 @@ def admin_replace_publication_pdf(
         notes=version_notes,
     )
     return result
+
+
+@app.post("/admin/api/publications/{slug}/external")
+def admin_create_external_publication(
+    slug: str,
+    request: Request,
+    title: str = Form(...),
+    description: str | None = Form(default=None),
+    publication_date: str | None = Form(default=None),
+    source_url: str = Form(...),
+    flipbook_type: str | None = Form(default="ebook"),
+    page_count: int = Form(...),
+) -> dict[str, Any]:
+    require_admin_request(request)
+    normalized_slug = validate_slug(slug)
+    if page_count < 1:
+        raise HTTPException(status_code=400, detail="page_count must be at least 1.")
+    if not external_url(source_url):
+        raise HTTPException(status_code=400, detail="source_url must be an http or https URL.")
+
+    destination_dir = publication_dir(normalized_slug)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    reset_directory(destination_dir / "pages")
+    reset_directory(destination_dir / "thumbs")
+
+    timestamp = now_iso()
+    manifest = {
+        "slug": normalized_slug,
+        "title": title,
+        "description": description or "",
+        "status": "uploaded",
+        "original_pdf_path": "",
+        "page_count": page_count,
+        "publication_date": publication_date or timestamp[:10],
+        "upload_date": timestamp[:10],
+        "version_notes": "External PDF with pre-rendered page assets.",
+        "view_count": baseline_view_count(normalized_slug),
+        "last_viewed_at": None,
+        "source_url": source_url,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "processed_at": None,
+        "toc_page_number": None,
+        "flipbook_type": normalize_flipbook_type(flipbook_type),
+        "links": [],
+        "pages": [],
+        "viewer_settings": {},
+        "external_pdf": True,
+    }
+    manifest_file_path = write_manifest(normalized_slug, manifest)
+    record_archive_event(
+        action="uploaded",
+        slug=normalized_slug,
+        title=title,
+        flipbook_type=str(manifest["flipbook_type"]),
+        notes="External PDF manifest created for low-memory ingestion.",
+    )
+    return {
+        "status": "uploaded",
+        "slug": normalized_slug,
+        "page_count": page_count,
+        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
+        "manifest_path": str(manifest_file_path),
+    }
+
+
+@app.post("/admin/api/publications/{slug}/page-assets")
+def admin_upload_publication_page_assets(
+    slug: str,
+    request: Request,
+    page_number: int = Form(...),
+    page: UploadFile = File(...),
+    thumb: UploadFile = File(...),
+) -> dict[str, Any]:
+    require_admin_request(request)
+    normalized_slug = validate_slug(slug)
+    manifest = read_manifest(normalized_slug)
+    page_count = int(manifest.get("page_count") or 0)
+    if page_number < 1 or page_number > page_count:
+        raise HTTPException(status_code=400, detail="page_number is outside the publication page range.")
+
+    filename = f"page-{page_number:03d}.jpg"
+    destination_dir = publication_dir(normalized_slug)
+    pages_dir = destination_dir / "pages"
+    thumbs_dir = destination_dir / "thumbs"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+
+    for upload, target_dir, label in ((page, pages_dir, "page"), (thumb, thumbs_dir, "thumb")):
+        if not (upload.content_type or "").lower().startswith("image/jpeg"):
+            raise HTTPException(status_code=400, detail=f"{label} must be a JPEG image.")
+        try:
+            with (target_dir / filename).open("wb") as output_file:
+                shutil.copyfileobj(upload.file, output_file)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"{label} image could not be stored: {exc}") from exc
+
+    manifest["pages"] = merge_page_assets(manifest.get("pages") or [], [page_asset(page_number, normalized_slug)])
+    manifest["status"] = "processed" if len(manifest["pages"]) >= page_count else "processing"
+    if manifest["status"] == "processed":
+        manifest["processed_at"] = now_iso()
+    manifest["updated_at"] = now_iso()
+    manifest["pages_path"] = str(pages_dir)
+    manifest["thumbs_path"] = str(thumbs_dir)
+    write_manifest(normalized_slug, manifest)
+    return {
+        "status": manifest["status"],
+        "slug": normalized_slug,
+        "page_number": page_number,
+        "rendered_total": len(manifest["pages"]),
+        "page_count": page_count,
+    }
 
 
 @app.post("/admin/api/publications/{slug}/type")
