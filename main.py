@@ -1412,13 +1412,15 @@ def refresh_publication_links(slug: str) -> dict[str, Any]:
 def get_publication_pdf(slug: str) -> Any:
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
-    pdf_path = Path(str(manifest.get("original_pdf_path") or ""))
-    if not pdf_path.exists():
-        source_url = external_url(manifest.get("source_url"))
-        if source_url:
-            return RedirectResponse(url=source_url, status_code=302)
-        raise HTTPException(status_code=404, detail="Original PDF not found.")
-    return FileResponse(pdf_path, media_type="application/pdf", filename=f"{normalized_slug}.pdf")
+    original_pdf_path = str(manifest.get("original_pdf_path") or "")
+    if original_pdf_path:
+        pdf_path = Path(original_pdf_path)
+        if pdf_path.exists():
+            return FileResponse(pdf_path, media_type="application/pdf", filename=f"{normalized_slug}.pdf")
+    source_url = external_url(manifest.get("source_url"))
+    if source_url:
+        return RedirectResponse(url=source_url, status_code=302)
+    raise HTTPException(status_code=404, detail="Original PDF not found.")
 
 
 @app.get("/api/publications/{slug}/assets/{asset_type}/{filename}")
@@ -1544,6 +1546,9 @@ def admin_create_external_publication(
     destination_dir.mkdir(parents=True, exist_ok=True)
     reset_directory(destination_dir / "pages")
     reset_directory(destination_dir / "thumbs")
+    previous_pdf_path = destination_dir / "original.pdf"
+    if previous_pdf_path.exists():
+        previous_pdf_path.unlink()
 
     timestamp = now_iso()
     manifest = {
