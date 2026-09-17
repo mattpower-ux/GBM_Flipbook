@@ -1212,7 +1212,12 @@ def process_publication_batch(slug: str, start_page: int, limit: int) -> dict[st
     manifest = read_manifest(normalized_slug)
     pdf_path = Path(manifest["original_pdf_path"])
     if not manifest.get("links"):
-        manifest = refresh_embedded_links(normalized_slug, manifest)
+        try:
+            manifest = refresh_embedded_links(normalized_slug, manifest)
+        except Exception as exc:
+            manifest["links"] = []
+            manifest["toc_page_number"] = None
+            manifest["error"] = f"Embedded link extraction skipped: {exc}"
     rendered_batch = render_pdf_page_range(normalized_slug, pdf_path, start_page=start_page, limit=limit)
     manifest["page_count"] = rendered_batch["page_count"]
     manifest["pages"] = merge_page_assets(manifest.get("pages") or [], rendered_batch["rendered_pages"])
