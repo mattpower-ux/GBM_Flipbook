@@ -68,6 +68,54 @@ PUBLICATION_DISPLAY_OVERRIDES = {
         "display_date": "March/April 2026",
     },
 }
+EBOOK_CHRONOLOGY_ORDER = {
+    "a-growing-resiliency-economy-addressing-upfront-cost-challenges": 2600,
+    "the-case-for-residential-fire-sprinklers": 2590,
+    "the-perfect-envelope": 2580,
+    "resilient-homes": 2570,
+    "intelligent-energy-solutions": 2560,
+    "multifamily-projects": 2550,
+    "why-right-sizing-water-calculations-matter": 2540,
+    "home-retrofits-that-pay-their-way": 2530,
+    "builder-consumer-dynamics-in-the-age-of-electrification": 2520,
+    "pushing-the-envelope": 2510,
+    "sustainable-kitchens-and-baths": 2500,
+    "2025-homeowner-s-handbook": 2490,
+    "2024-homeowners-handbook": 2400,
+    "cultured-stone": 2390,
+    "net-zero-everything": 2380,
+    "2023-homeowner-s-handbook": 2370,
+    "remodeling-field-report": 2360,
+    "the-return-of-the-garden": 2350,
+    "the-great-american-electrification": 2340,
+    "the-2022-homeowner-s-handbook-of-green-building-remodeling": 2330,
+    "2024-energy-insights": 2320,
+    "healthy-homes": 2310,
+    "decarbonization-from-theory-to-reality": 2300,
+    "2023-outdoor-living-guide": 2290,
+    "the-healthy-home-handbook": 2280,
+    "water-heaters-in-control": 2270,
+    "make-every-house-a-smart-home": 2260,
+    "today-s-smart-solar-home": 2250,
+    "enough-is-enough": 2240,
+    "the-sonders-project": 2230,
+    "the-evolution-of-housing": 2220,
+    "the-pursuit-of-perfect-air": 2210,
+    "how-to-profit-from-smart-tech-for-garage-door-openers": 2200,
+    "2021-outdoor-living-guide": 2190,
+    "grow-your-business-with-the-gold-standard-of-green-paints": 2180,
+    "get-severe-weather-protection-from-closed-cell-spray-foam-insulation": 2170,
+    "coronavirus-and-health-wellness": 2160,
+    "2024-outdoor-living": 2150,
+    "beat-the-heat": 2140,
+    "energy-insights-2023": 2130,
+    "the-tiny-house-tactical-guide-2nd-edition": 2120,
+    "the-celestia-project": 2100,
+    "metal-roofing-inspiration-book": 2090,
+    "design-with-fire-in-mind": 2080,
+    "safe-havens-in-turbulent-times": 2070,
+    "2021-home-buyers-guide": 2060,
+}
 MAGAZINE_SUBSCRIPTION_URL = "https://app.hubspot.com/payments/RyZtj5CYSiem?referrer=PAYMENT_LINK"
 EDITOR_EMAIL = "matt.power@greenbuildermedia.com"
 HUBSPOT_PORTAL_ID = "309276"
@@ -820,12 +868,14 @@ def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
         cover_url = str(pages[0].get("image_url") or pages[0].get("thumb_url") or "")
     flipbook_type = normalize_flipbook_type(str(manifest.get("flipbook_type") or "magazine"))
     date = publication_date(manifest)
+    sort_rank = EBOOK_CHRONOLOGY_ORDER.get(slug, 0) if flipbook_type == "ebook" else 0
     return {
         "slug": slug,
         "title": str(display_override.get("title") or manifest.get("title") or slug.replace("-", " ").title()),
         "description": str(manifest.get("description") or ""),
         "date": date,
         "display_date": str(display_override.get("display_date") or date),
+        "sort_rank": f"{sort_rank:04d}",
         "cover_url": cover_url,
         "status": str(manifest.get("status") or "unknown"),
         "flipbook_type": flipbook_type,
@@ -864,7 +914,7 @@ def list_publications() -> list[dict[str, str]]:
         except (OSError, json.JSONDecodeError):
             continue
 
-    return sorted(publications, key=lambda item: item["date"], reverse=True)
+    return sorted(publications, key=lambda item: (item["date"], item.get("sort_rank", "0000")), reverse=True)
 
 
 def render_archive_view(
