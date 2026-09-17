@@ -263,8 +263,13 @@ def read_manifest(slug: str) -> dict[str, Any]:
     if not path.exists():
         raise HTTPException(status_code=404, detail="Publication manifest not found.")
 
-    with path.open("r", encoding="utf-8") as manifest_file:
-        return json.load(manifest_file)
+    try:
+        with path.open("r", encoding="utf-8") as manifest_file:
+            return json.load(manifest_file)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"Publication manifest is invalid JSON: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Publication manifest could not be read: {exc}") from exc
 
 
 def write_manifest(slug: str, manifest: dict[str, Any]) -> Path:
@@ -780,10 +785,18 @@ def save_publication_upload(
             shutil.rmtree(asset_dir)
 
     pdf_path = destination_dir / "original.pdf"
-    with pdf_path.open("wb") as output_file:
-        shutil.copyfileobj(file.file, output_file)
+    try:
+        with pdf_path.open("wb") as output_file:
+            shutil.copyfileobj(file.file, output_file)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Uploaded PDF could not be stored: {exc}") from exc
 
-    page_count = get_pdf_page_count(pdf_path)
+    try:
+        page_count = get_pdf_page_count(pdf_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Uploaded PDF page count failed: {exc}") from exc
     timestamp = now_iso()
     manifest = {
         "slug": normalized_slug,
@@ -807,7 +820,10 @@ def save_publication_upload(
         "pages": [],
         "viewer_settings": {},
     }
-    manifest_file_path = write_manifest(normalized_slug, manifest)
+    try:
+        manifest_file_path = write_manifest(normalized_slug, manifest)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Publication manifest could not be written: {exc}") from exc
     return {
         "status": "uploaded",
         "slug": normalized_slug,
