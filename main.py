@@ -57,6 +57,8 @@ BASELINE_VIEW_COUNTS = {
     "homeowners-handbook-of-green-building-remodeling-v1": 365,
     "gbm-remodeling-field-report": 45,
     "outdoor-living-guide": 59,
+    "2021-outdoor-living-guide": 59,
+    "healthy-home-august-2022": 59,
 }
 PUBLICATION_DISPLAY_OVERRIDES = {
     "green-builder-may-jun-2026": {
@@ -91,6 +93,7 @@ EBOOK_CHRONOLOGY_ORDER = {
     "the-2022-homeowner-s-handbook-of-green-building-remodeling": 2330,
     "2024-energy-insights": 2320,
     "healthy-homes": 2310,
+    "healthy-home-august-2022": 2305,
     "decarbonization-from-theory-to-reality": 2300,
     "2023-outdoor-living-guide": 2290,
     "the-healthy-home-handbook": 2280,
