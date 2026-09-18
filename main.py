@@ -1809,6 +1809,7 @@ def admin_update_publication_metadata(
     request: Request,
     interactive_url: str | None = Form(default=None),
     source_url: str | None = Form(default=None),
+    publication_date: str | None = Form(default=None),
 ) -> dict[str, Any]:
     require_admin_request(request)
     normalized_slug = validate_slug(slug)
@@ -1826,6 +1827,12 @@ def admin_update_publication_metadata(
             raise HTTPException(status_code=400, detail="Source URL must start with http:// or https://.")
         manifest["source_url"] = cleaned_source_url
 
+    if publication_date is not None:
+        cleaned_publication_date = publication_date.strip()
+        if cleaned_publication_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned_publication_date):
+            raise HTTPException(status_code=400, detail="Publication date must use YYYY-MM-DD format.")
+        manifest["publication_date"] = cleaned_publication_date
+
     manifest["updated_at"] = now_iso()
     write_manifest(normalized_slug, manifest)
     record_archive_event(
@@ -1840,6 +1847,7 @@ def admin_update_publication_metadata(
         "slug": normalized_slug,
         "interactive_url": manifest.get("interactive_url") or "",
         "source_url": manifest.get("source_url") or "",
+        "publication_date": manifest.get("publication_date") or "",
     }
 
 
