@@ -100,6 +100,7 @@ EBOOK_CHRONOLOGY_ORDER = {
     "decarbonization-from-theory-to-reality": 2300,
     "2023-outdoor-living-guide": 2290,
     "the-healthy-home-handbook": 2280,
+    "2022-outdoor-living-guide": 2275,
     "water-heaters-in-control": 2270,
     "make-every-house-a-smart-home": 2260,
     "today-s-smart-solar-home": 2250,
@@ -1612,6 +1613,89 @@ def admin_create_external_publication(
         "status": "uploaded",
         "slug": normalized_slug,
         "page_count": page_count,
+        "manifest_url": f"/api/publications/{normalized_slug}/manifest",
+        "manifest_path": str(manifest_file_path),
+    }
+
+
+@app.post("/admin/api/publications/{slug}/remote-pages")
+def admin_create_remote_page_publication(
+    slug: str,
+    request: Request,
+    title: str = Form(...),
+    description: str | None = Form(default=None),
+    publication_date: str | None = Form(default=None),
+    source_url: str = Form(...),
+    flipbook_type: str | None = Form(default="ebook"),
+    page_urls: str = Form(...),
+    cover_url: str | None = Form(default=None),
+) -> dict[str, Any]:
+    require_admin_request(request)
+    normalized_slug = validate_slug(slug)
+    if not external_url(source_url):
+        raise HTTPException(status_code=400, detail="source_url must be an http or https URL.")
+    try:
+        parsed_page_urls = json.loads(page_urls)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="page_urls must be a JSON array.") from exc
+    if not isinstance(parsed_page_urls, list) or not parsed_page_urls:
+        raise HTTPException(status_code=400, detail="page_urls must be a non-empty JSON array.")
+
+    pages = []
+    for index, value in enumerate(parsed_page_urls, start=1):
+        page_url = str(value or "").strip()
+        if not (external_url(page_url) or page_url.startswith("/api/")):
+            raise HTTPException(status_code=400, detail="Each page URL must be absolute or an internal /api/ URL.")
+        pages.append({"page_number": index, "image_url": page_url, "thumb_url": page_url})
+
+    cleaned_cover_url = str(cover_url or "").strip()
+    if cleaned_cover_url and not (external_url(cleaned_cover_url) or cleaned_cover_url.startswith("/api/")):
+        raise HTTPException(status_code=400, detail="cover_url must be absolute or an internal /api/ URL.")
+
+    destination_dir = publication_dir(normalized_slug)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    previous_pdf_path = destination_dir / "original.pdf"
+    if previous_pdf_path.exists():
+        previous_pdf_path.unlink()
+
+    timestamp = now_iso()
+    manifest = {
+        "slug": normalized_slug,
+        "title": title,
+        "description": description or "",
+        "status": "processed",
+        "original_pdf_path": "",
+        "page_count": len(pages),
+        "publication_date": publication_date or timestamp[:10],
+        "upload_date": timestamp[:10],
+        "version_notes": "Remote page assets; no local PDF stored.",
+        "view_count": baseline_view_count(normalized_slug),
+        "last_viewed_at": None,
+        "source_url": source_url,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "processed_at": timestamp,
+        "toc_page_number": None,
+        "flipbook_type": normalize_flipbook_type(flipbook_type),
+        "links": [],
+        "pages": pages,
+        "viewer_settings": {},
+        "external_pdf": True,
+    }
+    if cleaned_cover_url:
+        manifest["cover_url"] = cleaned_cover_url
+    manifest_file_path = write_manifest(normalized_slug, manifest)
+    record_archive_event(
+        action="uploaded",
+        slug=normalized_slug,
+        title=title,
+        flipbook_type=str(manifest["flipbook_type"]),
+        notes="Remote page manifest created for low-disk ingestion.",
+    )
+    return {
+        "status": "processed",
+        "slug": normalized_slug,
+        "page_count": len(pages),
         "manifest_url": f"/api/publications/{normalized_slug}/manifest",
         "manifest_path": str(manifest_file_path),
     }
