@@ -21,6 +21,7 @@ DEFAULT_STORAGE_PATH = "/data/flipbooks"
 FALLBACK_STORAGE_PATH = "/tmp/flipbooks"
 PAGE_RENDER_SCALE = float(os.getenv("PAGE_RENDER_SCALE", "1.5"))
 THUMB_RENDER_SCALE = 0.35
+COVER_RENDER_SCALE = float(os.getenv("COVER_RENDER_SCALE", "1.8"))
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ASSET_FILENAME_PATTERN = re.compile(r"^page-[0-9]{3,5}\.jpg$")
 VALID_FLIPBOOK_TYPES = {"magazine": "Magazine", "ebook": "Ebook"}
@@ -363,6 +364,10 @@ def page_asset(page_number: int, slug: str) -> dict[str, Any]:
     }
 
 
+def cover_asset_url(slug: str) -> str:
+    return f"/api/publications/{slug}/assets/covers/cover.jpg"
+
+
 def get_pdf_object(value: Any) -> Any:
     if isinstance(value, IndirectObject):
         return value.get_object()
@@ -637,8 +642,10 @@ def render_pdf_page_range(slug: str, pdf_path: Path, start_page: int, limit: int
     destination_dir = publication_dir(slug)
     pages_dir = destination_dir / "pages"
     thumbs_dir = destination_dir / "thumbs"
+    covers_dir = destination_dir / "covers"
     pages_dir.mkdir(parents=True, exist_ok=True)
     thumbs_dir.mkdir(parents=True, exist_ok=True)
+    covers_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         document = pymupdf.open(str(pdf_path))
@@ -684,6 +691,15 @@ def render_pdf_page_range(slug: str, pdf_path: Path, start_page: int, limit: int
             )
             thumb_pixmap.save(str(thumbs_dir / filename))
             del thumb_pixmap
+
+            if page_number == 1:
+                cover_pixmap = page.get_pixmap(
+                    matrix=pymupdf.Matrix(COVER_RENDER_SCALE, COVER_RENDER_SCALE),
+                    colorspace=pymupdf.csRGB,
+                    alpha=False,
+                )
+                cover_pixmap.save(str(covers_dir / "cover.jpg"))
+                del cover_pixmap
             del page
 
             page_assets.append(page_asset(page_number, slug))
@@ -884,9 +900,9 @@ def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
     slug = str(manifest.get("slug") or "")
     display_override = PUBLICATION_DISPLAY_OVERRIDES.get(slug, {})
     pages = manifest.get("pages") or []
-    cover_url = ""
+    cover_url = str(manifest.get("cover_url") or "")
     if pages and isinstance(pages[0], dict):
-        cover_url = str(pages[0].get("image_url") or pages[0].get("thumb_url") or "")
+        cover_url = cover_url or str(pages[0].get("image_url") or pages[0].get("thumb_url") or "")
     flipbook_type = normalize_flipbook_type(str(manifest.get("flipbook_type") or "magazine"))
     date = publication_date(manifest)
     sort_rank = EBOOK_CHRONOLOGY_ORDER.get(slug, 0) if flipbook_type == "ebook" else 0
@@ -1245,6 +1261,8 @@ def process_publication_batch(slug: str, start_page: int, limit: int) -> dict[st
     manifest["pages"] = merge_page_assets(manifest.get("pages") or [], rendered_batch["rendered_pages"])
     manifest["pages_path"] = rendered_batch["pages_path"]
     manifest["thumbs_path"] = rendered_batch["thumbs_path"]
+    if any(int(page.get("page_number") or 0) == 1 for page in rendered_batch["rendered_pages"]):
+        manifest["cover_url"] = cover_asset_url(normalized_slug)
     manifest["status"] = "processed" if len(manifest["pages"]) >= manifest["page_count"] else "processing"
     if manifest["status"] == "processed":
         manifest["processed_at"] = now_iso()
@@ -1431,9 +1449,12 @@ def get_publication_pdf(slug: str) -> Any:
 @app.get("/api/publications/{slug}/assets/{asset_type}/{filename}")
 def get_publication_asset(slug: str, asset_type: str, filename: str) -> FileResponse:
     normalized_slug = validate_slug(slug)
-    if asset_type not in {"pages", "thumbs"}:
+    if asset_type not in {"pages", "thumbs", "covers"}:
         raise HTTPException(status_code=404, detail="Asset type not found.")
-    if not ASSET_FILENAME_PATTERN.fullmatch(filename):
+    if asset_type == "covers":
+        if filename != "cover.jpg":
+            raise HTTPException(status_code=400, detail="Invalid cover filename.")
+    elif not ASSET_FILENAME_PATTERN.fullmatch(filename):
         raise HTTPException(status_code=400, detail="Invalid asset filename.")
     asset_path = publication_dir(normalized_slug) / asset_type / filename
     if not asset_path.exists():
@@ -1642,6 +1663,33 @@ def admin_upload_publication_page_assets(
         "rendered_total": len(manifest["pages"]),
         "page_count": page_count,
     }
+
+
+@app.post("/admin/api/publications/{slug}/cover")
+def admin_upload_publication_cover(
+    slug: str,
+    request: Request,
+    cover: UploadFile = File(...),
+) -> dict[str, str]:
+    require_admin_request(request)
+    normalized_slug = validate_slug(slug)
+    manifest = read_manifest(normalized_slug)
+    if not (cover.content_type or "").lower().startswith("image/jpeg"):
+        raise HTTPException(status_code=400, detail="Cover must be a JPEG image.")
+
+    covers_dir = publication_dir(normalized_slug) / "covers"
+    covers_dir.mkdir(parents=True, exist_ok=True)
+    cover_path = covers_dir / "cover.jpg"
+    try:
+        with cover_path.open("wb") as output_file:
+            shutil.copyfileobj(cover.file, output_file)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Cover image could not be stored: {exc}") from exc
+
+    manifest["cover_url"] = cover_asset_url(normalized_slug)
+    manifest["updated_at"] = now_iso()
+    write_manifest(normalized_slug, manifest)
+    return {"status": "updated", "slug": normalized_slug, "cover_url": manifest["cover_url"]}
 
 
 @app.post("/admin/api/publications/{slug}/type")
