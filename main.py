@@ -127,6 +127,24 @@ MAGAZINE_SUBSCRIPTION_URL = "https://app.hubspot.com/payments/RyZtj5CYSiem?refer
 EDITOR_EMAIL = "matt.power@greenbuildermedia.com"
 HUBSPOT_PORTAL_ID = "309276"
 HUBSPOT_EVENT_PREFIX = f"pe{HUBSPOT_PORTAL_ID}"
+HUBSPOT_DEFAULT_FORM_ID = "ca14e4bc-4743-4ed4-a010-36be9140ec09"
+REGISTRATION_CAMPAIGNS = {
+    "": "Unassigned",
+    "resiliency": "Resiliency",
+    "energy-efficiency": "Energy Efficiency",
+    "indoor-air-quality": "Indoor Air Quality",
+    "building-envelope": "Building Envelope",
+    "electrification": "Electrification",
+    "water": "Water",
+    "multifamily": "Multifamily",
+    "homeowners-handbook": "Homeowners Handbook",
+    "outdoor-living": "Outdoor Living",
+    "retrofits": "Retrofits",
+    "vha-henry": "VHA Henry",
+    "kitchens-baths": "Sustainable Kitchens and Baths",
+    "sustainable-products": "Sustainable Products",
+    "other": "Other",
+}
 
 active_storage_path: Path | None = None
 storage_warning: str | None = None
