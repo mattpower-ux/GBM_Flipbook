@@ -803,9 +803,15 @@ def save_publication_upload(
     flipbook_type: str | None = None,
     upload_date: str | None = None,
     version_notes: str | None = None,
+    registration_required: bool = False,
+    registration_portal_id: str | None = None,
+    registration_form_id: str | None = None,
+    registration_label_value: str | None = None,
+    registration_campaign: str | None = None,
 ) -> dict[str, Any]:
     normalized_slug = validate_slug(slug)
     existing_view_count = 0
+    validate_registration_settings(bool(registration_required), str(registration_portal_id or HUBSPOT_PORTAL_ID).strip(), str(registration_form_id or "").strip())
     existing_manifest_path = manifest_path(normalized_slug)
     if existing_manifest_path.exists():
         try:
@@ -851,6 +857,11 @@ def save_publication_upload(
         "view_count": max(existing_view_count, baseline_view_count(normalized_slug)),
         "last_viewed_at": None,
         "source_url": source_url or "",
+        "registration_required": bool(registration_required) and bool(str(registration_form_id or "").strip()),
+        "registration_portal_id": str(registration_portal_id or HUBSPOT_PORTAL_ID).strip() or HUBSPOT_PORTAL_ID,
+        "registration_form_id": str(registration_form_id or "").strip(),
+        "registration_label": str(registration_label_value or "").strip(),
+        "registration_campaign": normalize_registration_campaign(registration_campaign),
         "created_at": timestamp,
         "updated_at": timestamp,
         "processed_at": None,
@@ -888,6 +899,38 @@ def external_url(value: Any) -> str:
     if url.startswith(("https://", "http://")):
         return url
     return ""
+
+
+def form_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_registration_campaign(value: Any) -> str:
+    campaign = str(value or "").strip()
+    return campaign[:200]
+
+
+def registration_campaign_options(selected: str = "") -> str:
+    selected_campaign = normalize_registration_campaign(selected)
+    return "".join(
+        f"""<option value="{html.escape(key)}"{' selected' if key == selected_campaign else ''}>{html.escape(label)}</option>"""
+        for key, label in REGISTRATION_CAMPAIGNS.items()
+    )
+
+
+def registration_enabled(manifest: dict[str, Any]) -> bool:
+    return bool(manifest.get("registration_required") and str(manifest.get("registration_form_id") or "").strip())
+
+
+def validate_registration_settings(required: bool, portal: str, form: str) -> None:
+    if required and (not re.fullmatch(r"[0-9]+", portal) or not re.fullmatch(
+        r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}", form
+    )):
+        raise HTTPException(status_code=400, detail="Registration requires a numeric HubSpot portal ID and a valid form ID.")
+
+
+def registration_label(manifest: dict[str, Any]) -> str:
+    return str(manifest.get("registration_label") or "Register to read this flipbook")
 
 
 def hubspot_tracking_markup() -> str:
@@ -940,6 +983,11 @@ def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
         "version_notes": str(manifest.get("version_notes") or ""),
         "interactive_url": external_url(manifest.get("interactive_url")),
         "view_count": str(publication_view_count(manifest)),
+        "registration_required": "true" if registration_enabled(manifest) else "false",
+        "registration_portal_id": str(manifest.get("registration_portal_id") or HUBSPOT_PORTAL_ID),
+        "registration_form_id": str(manifest.get("registration_form_id") or ""),
+        "registration_label": registration_label(manifest),
+        "registration_campaign": normalize_registration_campaign(manifest.get("registration_campaign")),
     }
 
 
@@ -994,16 +1042,22 @@ def render_archive_view(
     body_class = f' class="{" ".join(body_classes)}" style="{archive_body_styles}"'
     book_base_path = "/embed/book" if embedded else "/book"
     archive_publications = [
-        publication
+        dict(publication)
         for publication in publications
         if publication["status"] == "processed"
         and publication["cover_url"]
         and normalize_flipbook_type(publication.get("flipbook_type")) == selected_type
     ]
+    for publication in archive_publications:
+        if publication.get("registration_required") == "true":
+            publication["interactive_url"] = ""
     featured = archive_publications[0] if archive_publications else None
     remaining_publications = archive_publications[1:] if featured else []
 
     if featured:
+        featured_pdf_href = (f"{book_base_path}/{featured['slug']}" if featured.get("registration_required") == "true"
+                             else f"/api/publications/{featured['slug']}/original.pdf")
+        featured_download_flag = "" if featured.get("registration_required") == "true" else "download"
         featured_attrs = hs_tracking_attrs(featured, "open")
         featured_download_attrs = hs_tracking_attrs(featured, "download")
         featured_cover = (
@@ -1017,7 +1071,7 @@ def render_archive_view(
             else ""
         )
         featured_description = featured_description_markup(featured, selected_type)
-        featured_markup = f"""<section class="featured"><a class="featured-cover" href="{book_base_path}/{html.escape(featured['slug'])}" aria-label="Open {html.escape(featured['title'])}" {featured_attrs}>{featured_cover}</a><div class="featured-copy"><p class="eyebrow">{html.escape(latest_label)}</p><h2><a href="{book_base_path}/{html.escape(featured['slug'])}" {featured_attrs}>{html.escape(featured['title'])}</a></h2>{featured_description}<div class="featured-actions"><a class="button primary" href="{book_base_path}/{html.escape(featured['slug'])}" {featured_attrs}>Read Flipbook</a>{featured_interactive}<a class="button" href="/api/publications/{html.escape(featured['slug'])}/original.pdf" download {featured_download_attrs}>Download PDF</a></div></div></section>"""
+        featured_markup = f"""<section class="featured"><a class="featured-cover" href="{book_base_path}/{html.escape(featured['slug'])}" aria-label="Open {html.escape(featured['title'])}" {featured_attrs}>{featured_cover}</a><div class="featured-copy"><p class="eyebrow">{html.escape(latest_label)}</p><h2><a href="{book_base_path}/{html.escape(featured['slug'])}" {featured_attrs}>{html.escape(featured['title'])}</a></h2>{featured_description}<div class="featured-actions"><a class="button primary" href="{book_base_path}/{html.escape(featured['slug'])}" {featured_attrs}>Read Flipbook</a>{featured_interactive}<a class="button" href="{html.escape(featured_pdf_href)}" {featured_download_flag} {featured_download_attrs}>Download PDF</a></div></div></section>"""
     else:
         featured_markup = '<p class="empty">No flipbooks have been published yet.</p>'
 
@@ -1070,7 +1124,15 @@ def render_book_viewer(manifest: dict[str, Any], embedded: bool = False) -> HTML
         if interactive_url
         else ""
     )
-    manifest_json = html.escape(json.dumps(manifest), quote=False)
+    manifest_json = json.dumps(manifest).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    requires_registration = registration_enabled(manifest)
+    registration_gate_markup = ""
+    hubspot_forms_script = ""
+    if requires_registration:
+        gate_title = html.escape(registration_label(manifest))
+        gate_campaign = "Green Builder Media"
+        registration_gate_markup = f"""<section class="registration-gate" id="registrationGate"><div class="registration-card"><p class="eyebrow">{html.escape(gate_campaign)}</p><h2>{gate_title}</h2><p>Submit the short form below to open this flipbook.</p><div id="registrationFormMount"></div></div></section>"""
+        hubspot_forms_script = '<script src="https://js.hsforms.net/forms/v2.js" defer></script>'
     template = """<!doctype html>
 <html lang="en">
 <head>
@@ -1078,14 +1140,16 @@ def render_book_viewer(manifest: dict[str, Any], embedded: bool = False) -> HTML
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
 <style>
-:root{color-scheme:dark;--bg:#0e141b;--bg-soft:#151d27;--panel:#202a35;--panel-strong:#27333f;--ink:#edf5f0;--muted:#a8b8b1;--line:#3a4855;--brand:#29b17d;--brand-dark:#11271e;--link:#d8b24c;--paper:#f7faf8}*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--ink)}button,a.button{min-height:38px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:0 12px;font:inherit;font-weight:700;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px}button:hover,a.button:hover,button:focus-visible,a.button:focus-visible{border-color:var(--brand);outline:2px solid transparent;background:var(--panel-strong)}button[aria-pressed=true]{border-color:var(--brand);background:var(--brand-dark);color:#cbf4e2}button:disabled{cursor:not-allowed;opacity:.42}.app{min-height:100vh;display:grid;grid-template-rows:auto 1fr}header{background:#111820;border-bottom:1px solid var(--line);padding:12px 18px;display:grid;grid-template-columns:auto minmax(0,1fr);gap:14px;align-items:center;position:sticky;top:0;z-index:10}.archive-button{white-space:nowrap;background:#0f151d;border-color:#536270;text-transform:uppercase;font-size:13px}.title-block{min-width:0}h1{margin:0;font-size:18px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{margin-top:4px;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.toolbar,.reader-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.reader-actions{justify-content:flex-end}.reader-bar{position:sticky;top:0;z-index:8;margin:0 auto 16px;width:min(100%,1180px);display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;background:rgba(17,24,32,.92);border:1px solid var(--line);border-radius:8px;padding:10px;box-shadow:0 14px 28px rgba(0,0,0,.25);backdrop-filter:blur(10px)}.counter{color:var(--muted);font-size:14px;min-width:86px;text-align:center}.keyboard-hint{color:var(--muted);font-size:13px;font-weight:700;white-space:nowrap}.download-button{background:var(--brand);border-color:var(--brand);color:#06120d}.download-button:hover,.download-button:focus-visible{background:#35c992;color:#04100b}.exit-button{position:fixed;right:18px;bottom:18px;z-index:20;background:#0f151d;border-color:#536270;box-shadow:0 18px 34px rgba(0,0,0,.35)}.exit-button:hover,.exit-button:focus-visible{background:#1c2630}.layout{min-height:0;display:grid;grid-template-columns:138px minmax(0,1fr);background:var(--bg)}aside{border-right:1px solid var(--line);background:#111820;overflow:auto;padding:10px}.thumbs{display:grid;gap:10px}.thumb{width:100%;border:2px solid transparent;border-radius:6px;padding:4px;background:transparent;height:auto;display:grid;gap:4px;color:var(--muted);font-size:12px;font-weight:700}.thumb:hover{background:#1c2630}.thumb[aria-current=true]{border-color:var(--brand);background:#123226;color:#cbf4e2}.thumb img{width:100%;aspect-ratio:648/783;object-fit:cover;display:block;border-radius:3px;background:#222c36}.stage-wrap{min-width:0;min-height:0;overflow:auto;padding:18px 22px 28px;background:var(--bg-soft)}.stage{min-height:100%;display:flex;align-items:flex-start;justify-content:center}.page-frame{position:relative;width:min(100%,calc(760px * var(--zoom,1)));max-width:none;background:var(--paper);filter:drop-shadow(0 26px 42px rgba(0,0,0,.45))}.page-frame img{width:100%;display:block;background:var(--paper)}.spread-frame{display:flex;align-items:flex-start;justify-content:center;gap:10px;width:min(100%,calc(1520px * var(--zoom,1)));filter:drop-shadow(0 26px 42px rgba(0,0,0,.45))}.spread-frame .page-frame{width:calc(50% - 5px);filter:none}.pdf-hotspot{position:absolute;z-index:2;border:2px solid transparent;background:rgba(216,178,76,.01);border-radius:3px;cursor:pointer;padding:0}.pdf-hotspot.generated-link{border-color:rgba(216,178,76,.9);background:rgba(216,178,76,.16)}.pdf-hotspot:hover,.pdf-hotspot:focus-visible{border-color:var(--link);background:rgba(216,178,76,.25);outline:0}.empty{max-width:680px;margin:18vh auto 0;color:var(--muted);line-height:1.5}@media(max-width:760px){header{grid-template-columns:1fr;padding:12px}.archive-button{justify-self:start}.reader-bar{grid-template-columns:1fr;margin-bottom:12px}.toolbar,.reader-actions{justify-content:flex-start;overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px}.layout{grid-template-columns:1fr;grid-template-rows:1fr auto}aside{grid-row:2;border-right:0;border-top:1px solid var(--line);padding:8px}.thumbs{grid-auto-flow:column;grid-auto-columns:76px;overflow-x:auto;gap:8px}.stage-wrap{padding:12px 12px 68px}.page-frame{width:min(100%,calc(560px * var(--zoom,1)))}.spread-frame{gap:6px;width:min(100%,calc(960px * var(--zoom,1)))}.keyboard-hint{font-size:12px}.exit-button{right:12px;bottom:12px}}
+:root{color-scheme:dark;--bg:#0e141b;--bg-soft:#151d27;--panel:#202a35;--panel-strong:#27333f;--ink:#edf5f0;--muted:#a8b8b1;--line:#3a4855;--brand:#29b17d;--brand-dark:#11271e;--link:#d8b24c;--paper:#f7faf8}*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--ink)}button,a.button{min-height:38px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:0 12px;font:inherit;font-weight:700;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px}button:hover,a.button:hover,button:focus-visible,a.button:focus-visible{border-color:var(--brand);outline:2px solid transparent;background:var(--panel-strong)}button[aria-pressed=true]{border-color:var(--brand);background:var(--brand-dark);color:#cbf4e2}button:disabled{cursor:not-allowed;opacity:.42}.app{min-height:100vh;display:grid;grid-template-rows:auto 1fr}header{background:#111820;border-bottom:1px solid var(--line);padding:12px 18px;display:grid;grid-template-columns:auto minmax(0,1fr);gap:14px;align-items:center;position:sticky;top:0;z-index:10}.archive-button{white-space:nowrap;background:#0f151d;border-color:#536270;text-transform:uppercase;font-size:13px}.title-block{min-width:0}h1{margin:0;font-size:18px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{margin-top:4px;color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.toolbar,.reader-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.reader-actions{justify-content:flex-end}.reader-bar{position:sticky;top:0;z-index:8;margin:0 auto 16px;width:min(100%,1180px);display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;background:rgba(17,24,32,.92);border:1px solid var(--line);border-radius:8px;padding:10px;box-shadow:0 14px 28px rgba(0,0,0,.25);backdrop-filter:blur(10px)}.counter{color:var(--muted);font-size:14px;min-width:86px;text-align:center}.keyboard-hint{color:var(--muted);font-size:13px;font-weight:700;white-space:nowrap}.download-button{background:var(--brand);border-color:var(--brand);color:#06120d}.download-button:hover,.download-button:focus-visible{background:#35c992;color:#04100b}.exit-button{position:fixed;right:18px;bottom:18px;z-index:20;background:#0f151d;border-color:#536270;box-shadow:0 18px 34px rgba(0,0,0,.35)}.exit-button:hover,.exit-button:focus-visible{background:#1c2630}.layout{min-height:0;display:grid;grid-template-columns:138px minmax(0,1fr);background:var(--bg)}aside{border-right:1px solid var(--line);background:#111820;overflow:auto;padding:10px}.thumbs{display:grid;gap:10px}.thumb{width:100%;border:2px solid transparent;border-radius:6px;padding:4px;background:transparent;height:auto;display:grid;gap:4px;color:var(--muted);font-size:12px;font-weight:700}.thumb:hover{background:#1c2630}.thumb[aria-current=true]{border-color:var(--brand);background:#123226;color:#cbf4e2}.thumb img{width:100%;aspect-ratio:648/783;object-fit:cover;display:block;border-radius:3px;background:#222c36}.stage-wrap{min-width:0;min-height:0;overflow:auto;padding:18px 22px 28px;background:var(--bg-soft)}.stage{min-height:100%;display:flex;align-items:flex-start;justify-content:center}.page-frame{position:relative;width:min(100%,calc(760px * var(--zoom,1)));max-width:none;background:var(--paper);filter:drop-shadow(0 26px 42px rgba(0,0,0,.45))}.page-frame img{width:100%;display:block;background:var(--paper)}.spread-frame{display:flex;align-items:flex-start;justify-content:center;gap:10px;width:min(100%,calc(1520px * var(--zoom,1)));filter:drop-shadow(0 26px 42px rgba(0,0,0,.45))}.spread-frame .page-frame{width:calc(50% - 5px);filter:none}.pdf-hotspot{position:absolute;z-index:2;border:2px solid transparent;background:rgba(216,178,76,.01);border-radius:3px;cursor:pointer;padding:0}.pdf-hotspot.generated-link{border-color:rgba(216,178,76,.9);background:rgba(216,178,76,.16)}.pdf-hotspot:hover,.pdf-hotspot:focus-visible{border-color:var(--link);background:rgba(216,178,76,.25);outline:0}.empty{max-width:680px;margin:18vh auto 0;color:var(--muted);line-height:1.5}.registration-gate{display:none;min-height:calc(100vh - 74px);padding:38px 18px;background:var(--bg-soft);place-items:start center}.registration-card{width:min(720px,100%);border:1px solid var(--line);border-radius:8px;background:#fff;color:#303052;padding:24px;box-shadow:0 24px 50px rgba(0,0,0,.32)}.registration-card .eyebrow{margin:0 0 8px;color:var(--brand);font-size:13px;text-transform:uppercase;font-weight:900}.registration-card h2{margin:0 0 10px;font-size:30px;line-height:1.1}.registration-card p{margin:0 0 18px;color:#4f5e68;line-height:1.45}body.registration-locked .registration-gate{display:grid}body.registration-locked .layout,body.registration-locked .exit-button{display:none}@media(max-width:760px){header{grid-template-columns:1fr;padding:12px}.archive-button{justify-self:start}.reader-bar{grid-template-columns:1fr;margin-bottom:12px}.toolbar,.reader-actions{justify-content:flex-start;overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px}.layout{grid-template-columns:1fr;grid-template-rows:1fr auto}aside{grid-row:2;border-right:0;border-top:1px solid var(--line);padding:8px}.thumbs{grid-auto-flow:column;grid-auto-columns:76px;overflow-x:auto;gap:8px}.stage-wrap{padding:12px 12px 68px}.page-frame{width:min(100%,calc(560px * var(--zoom,1)))}.spread-frame{gap:6px;width:min(100%,calc(960px * var(--zoom,1)))}.keyboard-hint{font-size:12px}.exit-button{right:12px;bottom:12px}}
+body.registration-unlocked .registration-gate{display:none}.registration-card{color-scheme:light}.registration-thanks .button,.registration-thanks button{margin-top:12px}.registration-thanks h2{color:#303052}
 </style>
 </head>
 <body>
-<div class="app"><header><a class="button archive-button" href="__BACK_HREF__" title="Return to publication archive">Return to Archive</a><div class="title-block"><h1>__TITLE__</h1><div class="meta"><span>__DESCRIPTION__</span><span id="status"> __STATUS__</span></div></div></header><div class="layout"><aside aria-label="Thumbnails"><div class="thumbs" id="thumbs"></div></aside><main class="stage-wrap" id="stageWrap"><div class="reader-bar"><div class="toolbar" aria-label="Page controls"><button type="button" id="prevBtn" title="Previous page">Prev</button><span class="counter" id="pageCounter">Page 0 / 0</span><button type="button" id="nextBtn" title="Next page">Next</button><span class="keyboard-hint">PgDn=Next Page</span></div><div class="toolbar" aria-label="View controls"><button type="button" id="zoomOutBtn" title="Zoom out">-</button><button type="button" id="zoomInBtn" title="Zoom in">+</button><button type="button" id="spreadBtn" title="Show side-by-side page spreads after the cover" aria-pressed="false">SHOW SPREADS</button><button type="button" id="tocBtn" title="Table of contents">TOC</button><a class="button" id="expandLink" href="/book/__SLUG__" target="_blank" rel="noopener noreferrer" title="Open expanded viewer in a full browser tab">Expand</a><button type="button" id="shareBtn" title="Copy link">Share</button></div><div class="reader-actions">__INTERACTIVE_BUTTON__<a class="button download-button" href="/api/publications/__SLUG__/original.pdf" download title="Download full PDF" __DOWNLOAD_ATTRS__>Download PDF</a></div></div><div class="stage" id="stage"></div></main></div><a class="button exit-button" href="__BACK_HREF__" title="Exit to publication archive">Exit</a></div>
+<div class="app"><header><a class="button archive-button" href="__BACK_HREF__" title="Return to publication archive">Return to Archive</a><div class="title-block"><h1>__TITLE__</h1><div class="meta"><span>__DESCRIPTION__</span><span id="status"> __STATUS__</span></div></div></header>__REGISTRATION_GATE__<div class="layout"><aside aria-label="Thumbnails"><div class="thumbs" id="thumbs"></div></aside><main class="stage-wrap" id="stageWrap"><div class="reader-bar"><div class="toolbar" aria-label="Page controls"><button type="button" id="prevBtn" title="Previous page">Prev</button><span class="counter" id="pageCounter">Page 0 / 0</span><button type="button" id="nextBtn" title="Next page">Next</button><span class="keyboard-hint">PgDn=Next Page</span></div><div class="toolbar" aria-label="View controls"><button type="button" id="zoomOutBtn" title="Zoom out">-</button><button type="button" id="zoomInBtn" title="Zoom in">+</button><button type="button" id="spreadBtn" title="Show side-by-side page spreads after the cover" aria-pressed="false">SHOW SPREADS</button><button type="button" id="tocBtn" title="Table of contents">TOC</button><a class="button" id="expandLink" href="/book/__SLUG__" target="_blank" rel="noopener noreferrer" title="Open expanded viewer in a full browser tab">Expand</a><button type="button" id="shareBtn" title="Copy link">Share</button></div><div class="reader-actions">__INTERACTIVE_BUTTON__<a class="button download-button" href="/api/publications/__SLUG__/original.pdf" download title="Download full PDF" __DOWNLOAD_ATTRS__>Download PDF</a></div></div><div class="stage" id="stage"></div></main></div><a class="button exit-button" href="__BACK_HREF__" title="Exit to publication archive">Exit</a></div>
 <script type="application/json" id="manifest-data">__MANIFEST__</script>
+__HUBSPOT_FORMS_SCRIPT__
 <script>
-const manifest=JSON.parse(document.getElementById('manifest-data').textContent);const pages=Array.isArray(manifest.pages)?manifest.pages:[];const links=Array.isArray(manifest.links)?manifest.links:[];const linksByPage=links.reduce((acc,link)=>{const page=String(link.source_page_number);(acc[page]||(acc[page]=[])).push(link);return acc},{});const stage=document.getElementById('stage');const thumbs=document.getElementById('thumbs');const counter=document.getElementById('pageCounter');const prevBtn=document.getElementById('prevBtn');const nextBtn=document.getElementById('nextBtn');const zoomInBtn=document.getElementById('zoomInBtn');const zoomOutBtn=document.getElementById('zoomOutBtn');const spreadBtn=document.getElementById('spreadBtn');const expandLink=document.getElementById('expandLink');const shareBtn=document.getElementById('shareBtn');const tocBtn=document.getElementById('tocBtn');const stageWrap=document.getElementById('stageWrap');let pageIndex=0;let zoom=1;let spreadsEnabled=false;function pageUrl(path){return new URL(path,window.location.origin).toString()}function normalizePageIndex(index){const bounded=Math.max(0,Math.min(index,pages.length-1));if(!spreadsEnabled||bounded===0)return bounded;return bounded%2===0?bounded-1:bounded}function visiblePageIndexes(){if(!spreadsEnabled||pageIndex===0)return[pageIndex];return[pageIndex,pageIndex+1].filter((index)=>index<pages.length)}function syncHash(){const pageNumber=pageIndex+1;if(window.location.hash!=='#page-'+pageNumber)history.replaceState(null,'','#page-'+pageNumber);if(expandLink)expandLink.href='/book/'+encodeURIComponent(manifest.slug)+'#page-'+pageNumber}function addPdfLinks(frame,pageNumber){(linksByPage[String(pageNumber)]||[]).forEach((link)=>{const rect=link.source_rect;if(!rect)return;const button=document.createElement('button');button.type='button';button.className='pdf-hotspot'+(link.generated==='manual-toc-page-number'?' generated-link':'');button.title=link.uri?'Open link':'Go to page '+link.target_page_number;button.setAttribute('aria-label',button.title);button.style.left=(rect.x*100)+'%';button.style.top=(rect.y*100)+'%';button.style.width=(rect.width*100)+'%';button.style.height=(rect.height*100)+'%';button.addEventListener('click',()=>{if(link.uri)window.open(link.uri,'_blank','noopener,noreferrer');else if(link.target_page_number)showPage(Number(link.target_page_number)-1)});frame.append(button)})}function buildPageFrame(page){const frame=document.createElement('div');frame.className='page-frame';frame.style.setProperty('--zoom',String(zoom));const img=document.createElement('img');img.src=pageUrl(page.image_url);img.alt=manifest.title+', page '+page.page_number;frame.append(img);addPdfLinks(frame,Number(page.page_number));return frame}function showPage(index){if(!pages.length){stage.innerHTML='<p class="empty">This publication has no rendered pages yet.</p>';counter.textContent='Page 0 / 0';prevBtn.disabled=true;nextBtn.disabled=true;spreadBtn.disabled=true;return}pageIndex=normalizePageIndex(index);const indexes=visiblePageIndexes();stage.innerHTML='';stage.classList.toggle('spread-view',spreadsEnabled&&indexes.length>1);if(indexes.length>1){const spread=document.createElement('div');spread.className='spread-frame';spread.style.setProperty('--zoom',String(zoom));indexes.forEach((pageNumberIndex)=>spread.append(buildPageFrame(pages[pageNumberIndex])));stage.append(spread)}else{stage.append(buildPageFrame(pages[pageIndex]))}const pageNumbers=indexes.map((pageNumberIndex)=>pages[pageNumberIndex].page_number);counter.textContent=pageNumbers.length>1?'Pages '+pageNumbers.join('-')+' / '+pages.length:'Page '+pageNumbers[0]+' / '+pages.length;prevBtn.disabled=pageIndex===0;nextBtn.disabled=spreadsEnabled?pageIndex>=pages.length-2:pageIndex===pages.length-1;const activeIndexes=new Set(indexes.map(String));document.querySelectorAll('.thumb').forEach((thumb)=>thumb.setAttribute('aria-current',activeIndexes.has(thumb.dataset.index)?'true':'false'));stageWrap.scrollTo({top:0,behavior:'smooth'});syncHash()}function movePage(direction){if(!spreadsEnabled)showPage(pageIndex+direction);else if(direction>0)showPage(pageIndex===0?1:pageIndex+2);else showPage(pageIndex<=1?0:pageIndex-2)}function setZoom(nextZoom){zoom=Math.max(.7,Math.min(nextZoom,2.4));document.querySelectorAll('.page-frame,.spread-frame').forEach((frame)=>frame.style.setProperty('--zoom',String(zoom)))}function renderThumbs(){thumbs.innerHTML='';pages.forEach((page,index)=>{const button=document.createElement('button');button.type='button';button.className='thumb';button.setAttribute('aria-label','Page '+page.page_number);button.dataset.index=String(index);const img=document.createElement('img');img.src=pageUrl(page.thumb_url);img.alt='';img.loading='lazy';const label=document.createElement('span');label.textContent=String(page.page_number);button.append(img,label);button.addEventListener('click',()=>showPage(index));thumbs.append(button)})}prevBtn.addEventListener('click',()=>movePage(-1));nextBtn.addEventListener('click',()=>movePage(1));zoomInBtn.addEventListener('click',()=>setZoom(zoom+.15));zoomOutBtn.addEventListener('click',()=>setZoom(zoom-.15));spreadBtn.addEventListener('click',()=>{spreadsEnabled=!spreadsEnabled;spreadBtn.setAttribute('aria-pressed',String(spreadsEnabled));spreadBtn.textContent=spreadsEnabled?'SHOW SINGLE':'SHOW SPREADS';showPage(pageIndex)});tocBtn.addEventListener('click',()=>{if(manifest.toc_page_number)showPage(Number(manifest.toc_page_number)-1)});shareBtn.addEventListener('click',async()=>{syncHash();await navigator.clipboard?.writeText(window.location.href);shareBtn.textContent='Copied';window.setTimeout(()=>shareBtn.textContent='Share',1200)});document.addEventListener('keydown',(event)=>{if(event.key==='ArrowLeft'||event.key==='PageUp'){event.preventDefault();movePage(-1)}if(event.key==='ArrowRight'||event.key==='PageDown'){event.preventDefault();movePage(1)}});window.addEventListener('hashchange',()=>{const match=window.location.hash.match(/^#page-(\\d+)$/);if(match)showPage(Number(match[1])-1)});const initialMatch=window.location.hash.match(/^#page-(\\d+)$/);if(initialMatch)pageIndex=Number(initialMatch[1])-1;renderThumbs();showPage(pageIndex);
+const manifest=JSON.parse(document.getElementById('manifest-data').textContent);const pages=Array.isArray(manifest.pages)?manifest.pages:[];const links=Array.isArray(manifest.links)?manifest.links:[];const registrationRequired=__REGISTRATION_REQUIRED__;const registrationPortalId=__REGISTRATION_PORTAL_ID__;const registrationFormId=__REGISTRATION_FORM_ID__;const registrationAccessKey='gbm-registration-'+String(manifest.slug||'')+'-'+registrationFormId;function hasRegistrationAccess(){try{return sessionStorage.getItem(registrationAccessKey)==='1'}catch(error){return false}}const linksByPage=links.reduce((acc,link)=>{const page=String(link.source_page_number);(acc[page]||(acc[page]=[])).push(link);return acc},{});const stage=document.getElementById('stage');const thumbs=document.getElementById('thumbs');const counter=document.getElementById('pageCounter');const prevBtn=document.getElementById('prevBtn');const nextBtn=document.getElementById('nextBtn');const zoomInBtn=document.getElementById('zoomInBtn');const zoomOutBtn=document.getElementById('zoomOutBtn');const spreadBtn=document.getElementById('spreadBtn');const expandLink=document.getElementById('expandLink');const shareBtn=document.getElementById('shareBtn');const tocBtn=document.getElementById('tocBtn');const stageWrap=document.getElementById('stageWrap');let pageIndex=0;let zoom=1;let spreadsEnabled=false;let readerRendered=false;function pageUrl(path){return new URL(path,window.location.origin).toString()}function normalizePageIndex(index){const bounded=Math.max(0,Math.min(index,pages.length-1));if(!spreadsEnabled||bounded===0)return bounded;return bounded%2===0?bounded-1:bounded}function visiblePageIndexes(){if(!spreadsEnabled||pageIndex===0)return[pageIndex];return[pageIndex,pageIndex+1].filter((index)=>index<pages.length)}function syncHash(){const pageNumber=pageIndex+1;if(window.location.hash!=='#page-'+pageNumber)history.replaceState(null,'','#page-'+pageNumber);if(expandLink)expandLink.href='/book/'+encodeURIComponent(manifest.slug)+'#page-'+pageNumber}function addPdfLinks(frame,pageNumber){(linksByPage[String(pageNumber)]||[]).forEach((link)=>{const rect=link.source_rect;if(!rect)return;const button=document.createElement('button');button.type='button';button.className='pdf-hotspot'+(link.generated==='manual-toc-page-number'?' generated-link':'');button.title=link.uri?'Open link':'Go to page '+link.target_page_number;button.setAttribute('aria-label',button.title);button.style.left=(rect.x*100)+'%';button.style.top=(rect.y*100)+'%';button.style.width=(rect.width*100)+'%';button.style.height=(rect.height*100)+'%';button.addEventListener('click',()=>{if(link.uri)window.open(link.uri,'_blank','noopener,noreferrer');else if(link.target_page_number)showPage(Number(link.target_page_number)-1)});frame.append(button)})}function buildPageFrame(page){const frame=document.createElement('div');frame.className='page-frame';frame.style.setProperty('--zoom',String(zoom));const img=document.createElement('img');img.src=pageUrl(page.image_url);img.alt=manifest.title+', page '+page.page_number;frame.append(img);addPdfLinks(frame,Number(page.page_number));return frame}function showPage(index){if(!pages.length){stage.innerHTML='<p class="empty">This publication has no rendered pages yet.</p>';counter.textContent='Page 0 / 0';prevBtn.disabled=true;nextBtn.disabled=true;spreadBtn.disabled=true;return}pageIndex=normalizePageIndex(index);const indexes=visiblePageIndexes();stage.innerHTML='';stage.classList.toggle('spread-view',spreadsEnabled&&indexes.length>1);if(indexes.length>1){const spread=document.createElement('div');spread.className='spread-frame';spread.style.setProperty('--zoom',String(zoom));indexes.forEach((pageNumberIndex)=>spread.append(buildPageFrame(pages[pageNumberIndex])));stage.append(spread)}else{stage.append(buildPageFrame(pages[pageIndex]))}const pageNumbers=indexes.map((pageNumberIndex)=>pages[pageNumberIndex].page_number);counter.textContent=pageNumbers.length>1?'Pages '+pageNumbers.join('-')+' / '+pages.length:'Page '+pageNumbers[0]+' / '+pages.length;prevBtn.disabled=pageIndex===0;nextBtn.disabled=spreadsEnabled?pageIndex>=pages.length-2:pageIndex===pages.length-1;const activeIndexes=new Set(indexes.map(String));document.querySelectorAll('.thumb').forEach((thumb)=>thumb.setAttribute('aria-current',activeIndexes.has(thumb.dataset.index)?'true':'false'));stageWrap.scrollTo({top:0,behavior:'smooth'});syncHash()}function movePage(direction){if(!spreadsEnabled)showPage(pageIndex+direction);else if(direction>0)showPage(pageIndex===0?1:pageIndex+2);else showPage(pageIndex<=1?0:pageIndex-2)}function setZoom(nextZoom){zoom=Math.max(.7,Math.min(nextZoom,2.4));document.querySelectorAll('.page-frame,.spread-frame').forEach((frame)=>frame.style.setProperty('--zoom',String(zoom)))}function renderThumbs(){thumbs.innerHTML='';pages.forEach((page,index)=>{const button=document.createElement('button');button.type='button';button.className='thumb';button.setAttribute('aria-label','Page '+page.page_number);button.dataset.index=String(index);const img=document.createElement('img');img.src=pageUrl(page.thumb_url);img.alt='';img.loading='lazy';const label=document.createElement('span');label.textContent=String(page.page_number);button.append(img,label);button.addEventListener('click',()=>showPage(index));thumbs.append(button)})}function renderReader(){if(readerRendered)return;readerRendered=true;document.body.classList.remove('registration-locked');document.body.classList.add('registration-unlocked');renderThumbs();showPage(pageIndex)}function unlockRegistration(){try{sessionStorage.setItem(registrationAccessKey,'1')}catch(error){}const mount=document.getElementById('registrationFormMount');mount.replaceChildren();const heading=document.createElement('h2');heading.textContent='Thank you!';const message=document.createElement('p');message.textContent='Your registration for '+manifest.title+' is complete.';const download=document.createElement('a');download.className='button download-button';download.href='/api/publications/'+encodeURIComponent(manifest.slug)+'/original.pdf';download.textContent='Download PDF';download.setAttribute('download','');const read=document.createElement('button');read.type='button';read.textContent='Read Flipbook';read.addEventListener('click',renderReader);mount.className='registration-thanks';mount.append(heading,message,download,document.createTextNode(' '),read);document.querySelector('.registration-card>h2').hidden=true;document.querySelector('.registration-card>p:not(.eyebrow)').hidden=true;}function mountRegistrationForm(){document.body.classList.add('registration-locked');let attempts=0;const mount=()=>{if(!window.hbspt||!window.hbspt.forms){if(++attempts<100){window.setTimeout(mount,150);return}document.getElementById('registrationFormMount').textContent='The registration form could not load. Please allow HubSpot forms in your browser and reload this page.';return}try{window.hbspt.forms.create({region:'na1',portalId:registrationPortalId,formId:registrationFormId,target:'#registrationFormMount',inlineMessage:'Thank you for registering.',onFormSubmitted:unlockRegistration})}catch(error){document.getElementById('registrationFormMount').textContent='Unable to load this registration form. Please contact Green Builder Media.'}};mount()}prevBtn.addEventListener('click',()=>movePage(-1));nextBtn.addEventListener('click',()=>movePage(1));zoomInBtn.addEventListener('click',()=>setZoom(zoom+.15));zoomOutBtn.addEventListener('click',()=>setZoom(zoom-.15));spreadBtn.addEventListener('click',()=>{spreadsEnabled=!spreadsEnabled;spreadBtn.setAttribute('aria-pressed',String(spreadsEnabled));spreadBtn.textContent=spreadsEnabled?'SHOW SINGLE':'SHOW SPREADS';showPage(pageIndex)});tocBtn.addEventListener('click',()=>{if(manifest.toc_page_number)showPage(Number(manifest.toc_page_number)-1)});shareBtn.addEventListener('click',async()=>{syncHash();await navigator.clipboard?.writeText(window.location.href);shareBtn.textContent='Copied';window.setTimeout(()=>shareBtn.textContent='Share',1200)});document.addEventListener('keydown',(event)=>{if(document.body.classList.contains('registration-locked'))return;if(event.key==='ArrowLeft'||event.key==='PageUp'){event.preventDefault();movePage(-1)}if(event.key==='ArrowRight'||event.key==='PageDown'){event.preventDefault();movePage(1)}});window.addEventListener('hashchange',()=>{const match=window.location.hash.match(/^#page-(\\d+)$/);if(match)showPage(Number(match[1])-1)});const initialMatch=window.location.hash.match(/^#page-(\\d+)$/);if(initialMatch)pageIndex=Number(initialMatch[1])-1;if(registrationRequired&&registrationFormId&&!hasRegistrationAccess())mountRegistrationForm();else renderReader();
 </script>
 __HUBSPOT_TRACKING__
 </body>
@@ -1099,6 +1163,12 @@ __HUBSPOT_TRACKING__
         .replace("__BACK_HREF__", back_href)
         .replace("__DOWNLOAD_ATTRS__", download_attrs)
         .replace("__INTERACTIVE_BUTTON__", interactive_button)
+        .replace("__REGISTRATION_GATE__", registration_gate_markup)
+        .replace("__HUBSPOT_FORMS_SCRIPT__", hubspot_forms_script)
+        .replace("__REGISTRATION_REQUIRED__", json.dumps(requires_registration))
+        .replace("<body>", '<body class="registration-locked">' if requires_registration else '<body>')
+        .replace("__REGISTRATION_PORTAL_ID__", json.dumps(str(manifest.get("registration_portal_id") or HUBSPOT_PORTAL_ID)))
+        .replace("__REGISTRATION_FORM_ID__", json.dumps(str(manifest.get("registration_form_id") or "")))
         .replace("__HUBSPOT_TRACKING__", hubspot_tracking_markup())
         .replace("__MANIFEST__", manifest_json)
     )
@@ -1140,6 +1210,15 @@ def render_admin_view(
 ) -> HTMLResponse:
     selected_section = normalize_flipbook_type(section)
     section_label = VALID_FLIPBOOK_TYPES[selected_section]
+    saved_forms = [p for p in publications if p.get("registration_form_id")]
+    form_options = '<option value="">Choose an existing form or enter a new ID below</option>'
+    for p in sorted(saved_forms, key=lambda p: p["title"]):
+        form_options += '<option value="{}" data-portal="{}" data-campaign="{}" data-label="{}">{}</option>'.format(
+            html.escape(p["registration_form_id"], quote=True),
+            html.escape(p.get("registration_portal_id") or HUBSPOT_PORTAL_ID, quote=True),
+            html.escape(p.get("registration_campaign") or "", quote=True),
+            html.escape(p.get("registration_label") or p["title"], quote=True),
+            html.escape(p["title"]))
     filtered_publications = [
         publication
         for publication in publications
@@ -1153,13 +1232,19 @@ def render_admin_view(
         status = html.escape(publication["status"])
         cover_url = html.escape(publication["cover_url"])
         view_count = html.escape(format_count(publication.get("view_count")))
+        registration_required_value = html.escape(publication.get("registration_required", "false"))
+        registration_portal_id = html.escape(publication.get("registration_portal_id", HUBSPOT_PORTAL_ID))
+        registration_form_id = html.escape(publication.get("registration_form_id", ""))
+        registration_label_value = html.escape(publication.get("registration_label", ""))
+        registration_campaign = html.escape(publication.get("registration_campaign", ""))
+        registration_badge = "Registration" if publication.get("registration_required") == "true" else "Open"
         cover = (
             f'<img src="{cover_url}" alt="{title} cover">'
             if cover_url
             else '<span class="cover-placeholder">No cover</span>'
         )
         rows.append(
-            f"""<article class="publication-row"><label class="select-target"><input type="radio" name="selectedSlug" value="{slug}"><span class="cover">{cover}</span><span class="publication-copy"><strong>{title}</strong><span>{date} · {status}</span></span></label><span class="views-count">{view_count}</span></article>"""
+            f"""<article class="publication-row" data-registration-required="{registration_required_value}" data-registration-portal-id="{registration_portal_id}" data-registration-form-id="{registration_form_id}" data-registration-label="{registration_label_value}" data-registration-campaign="{registration_campaign}"><label class="select-target"><input type="radio" name="selectedSlug" value="{slug}"><span class="cover">{cover}</span><span class="publication-copy"><strong>{title}</strong><span>{date} · {status} · {html.escape(registration_badge)}</span></span></label><span class="views-count">{view_count}</span></article>"""
         )
     row_markup = "".join(rows) if rows else f'<p class="empty">No {html.escape(section_label.lower())} flipbooks have been uploaded yet.</p>'
     action_labels = {
@@ -1188,6 +1273,7 @@ def render_admin_view(
     ebook_href = "/admin?section=ebook"
     magazine_active = " active" if selected_section == "magazine" else ""
     ebook_active = " active" if selected_section == "ebook" else ""
+    campaign_options = registration_campaign_options()
     template = """<!doctype html>
 <html lang="en">
 <head>
@@ -1195,7 +1281,7 @@ def render_admin_view(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flipbook Admin</title>
 <style>
-:root{color-scheme:dark;--bg:#0e141b;--panel:#141d27;--panel-strong:#1d2935;--ink:#edf5f0;--muted:#a8b8b1;--line:#344351;--brand:#29b17d;--danger:#c84d4d}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{width:min(1280px,100%);margin:0 auto;padding:22px}h1{margin:0 0 14px;font-size:32px;line-height:1.1;letter-spacing:0}.section-switch{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 18px}.section-switch a{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;text-decoration:none;display:inline-flex;align-items:center;padding:0 12px}.section-switch a:hover,.section-switch a:focus-visible{border-color:var(--brand);outline:0}.section-switch a.active{background:var(--brand);border-color:var(--brand);color:#06120d}.logout-form{margin-left:auto}.logout-form button{background:transparent}.actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:18px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-width:0}h2{margin:0 0 12px;font-size:16px;letter-spacing:0}label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:700}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f151d;color:var(--ink);padding:9px}textarea{min-height:72px;resize:vertical}button{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;cursor:pointer;padding:0 12px}button:hover,button:focus-visible{border-color:var(--brand);outline:0}button:disabled{cursor:not-allowed;opacity:.45}button.primary{background:var(--brand);border-color:var(--brand);color:#06120d}button.danger{background:#2c1719;border-color:#683137;color:#ffdcdc}.form-grid{display:grid;gap:10px}.status{position:sticky;top:0;z-index:2;margin-bottom:14px;border:1px solid var(--line);background:#101820;border-radius:8px;padding:10px;color:var(--muted);font-size:14px}.admin-content{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,340px);align-items:start;gap:18px}.list-tools{display:flex;justify-content:flex-end;margin:0 0 10px}.publication-list-header{display:grid;grid-template-columns:minmax(0,1fr) 90px;gap:12px;padding:0 14px 8px;color:var(--muted);font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:0}.publication-list-header span:last-child{text-align:right}.publication-list{display:grid;gap:10px}.publication-row{display:grid;grid-template-columns:minmax(0,1fr) 90px;gap:12px;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px}.select-target{grid-template-columns:auto 56px minmax(0,1fr);align-items:center;gap:10px;color:var(--ink);font-size:14px;min-width:0}.select-target input{width:18px;height:18px}.cover{width:56px;aspect-ratio:648/783;border:1px solid var(--line);border-radius:4px;background:#202a35;display:grid;place-items:center;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.cover img{width:100%;height:100%;object-fit:cover;display:block}.publication-copy{display:grid;gap:4px;min-width:0}.publication-copy strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.publication-copy span{color:var(--muted);font-size:12px}.views-count{justify-self:end;color:var(--ink);font-size:15px;font-weight:900;font-variant-numeric:tabular-nums}.empty{color:var(--muted)}@media(max-width:860px){.actions{grid-template-columns:1fr}.admin-content{grid-template-columns:1fr}.logout-form{margin-left:0}.publication-list-header{display:none}.publication-row{grid-template-columns:1fr}.views-count{justify-self:start;margin-left:90px;color:var(--muted)}.views-count::before{content:"Views ";font-weight:700}}
+:root{color-scheme:dark;--bg:#0e141b;--panel:#141d27;--panel-strong:#1d2935;--ink:#edf5f0;--muted:#a8b8b1;--line:#344351;--brand:#29b17d;--danger:#c84d4d}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}main{width:min(1280px,100%);margin:0 auto;padding:22px}h1{margin:0 0 14px;font-size:32px;line-height:1.1;letter-spacing:0}.section-switch{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 18px}.section-switch a{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;text-decoration:none;display:inline-flex;align-items:center;padding:0 12px}.section-switch a:hover,.section-switch a:focus-visible{border-color:var(--brand);outline:0}.section-switch a.active{background:var(--brand);border-color:var(--brand);color:#06120d}.logout-form{margin-left:auto}.logout-form button{background:transparent}.actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-bottom:18px}.panel{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:14px;min-width:0}h2{margin:0 0 12px;font-size:16px;letter-spacing:0}label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:700}.check-row{display:flex;align-items:center;gap:8px;color:var(--ink)}.check-row input{width:18px;height:18px}fieldset{border:1px solid var(--line);border-radius:8px;padding:10px;display:grid;gap:10px}legend{padding:0 6px;color:var(--muted);font-size:12px;font-weight:900}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;border:1px solid var(--line);border-radius:6px;background:#0f151d;color:var(--ink);padding:9px}textarea{min-height:72px;resize:vertical}button{min-height:38px;border:1px solid var(--line);border-radius:6px;background:var(--panel-strong);color:var(--ink);font-weight:800;cursor:pointer;padding:0 12px}button:hover,button:focus-visible{border-color:var(--brand);outline:0}button:disabled{cursor:not-allowed;opacity:.45}button.primary{background:var(--brand);border-color:var(--brand);color:#06120d}button.danger{background:#2c1719;border-color:#683137;color:#ffdcdc}.form-grid{display:grid;gap:10px}.status{position:sticky;top:0;z-index:2;margin-bottom:14px;border:1px solid var(--line);background:#101820;border-radius:8px;padding:10px;color:var(--muted);font-size:14px}.admin-content{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,340px);align-items:start;gap:18px}.list-tools{display:flex;justify-content:flex-end;margin:0 0 10px}.publication-list-header{display:grid;grid-template-columns:minmax(0,1fr) 90px;gap:12px;padding:0 14px 8px;color:var(--muted);font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:0}.publication-list-header span:last-child{text-align:right}.publication-list{display:grid;gap:10px}.publication-row{display:grid;grid-template-columns:minmax(0,1fr) 90px;gap:12px;align-items:center;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px}.select-target{grid-template-columns:auto 56px minmax(0,1fr);align-items:center;gap:10px;color:var(--ink);font-size:14px;min-width:0}.select-target input{width:18px;height:18px}.cover{width:56px;aspect-ratio:648/783;border:1px solid var(--line);border-radius:4px;background:#202a35;display:grid;place-items:center;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.cover img{width:100%;height:100%;object-fit:cover;display:block}.publication-copy{display:grid;gap:4px;min-width:0}.publication-copy strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.publication-copy span{color:var(--muted);font-size:12px}.views-count{justify-self:end;color:var(--ink);font-size:15px;font-weight:900;font-variant-numeric:tabular-nums}.empty{color:var(--muted)}@media(max-width:860px){.admin-content{grid-template-columns:1fr}.logout-form{margin-left:0}.publication-list-header{display:none}.publication-row{grid-template-columns:1fr}.views-count{justify-self:start;margin-left:90px;color:var(--muted)}.views-count::before{content:"Views ";font-weight:700}}
 section.event-tracking{position:sticky;top:68px;max-height:calc(100vh - 90px);overflow:auto}.event-list{display:grid;gap:8px}.event-row{display:grid;gap:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px}.event-row div{display:grid;gap:3px;min-width:0}.event-row strong,.event-row b{font-size:14px;color:var(--ink)}.event-row span{color:var(--muted);font-size:12px;line-height:1.35}.event-notes{font-style:italic}@media(max-width:860px){section.event-tracking{position:static;max-height:none}}
 body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:#eef7f4;--ink:#303052;--muted:#4f5e68;--line:#dde5ea;--brand:#25b783;--danger:#b42318}body.admin-light input,body.admin-light select,body.admin-light textarea{background:#ffffff;color:var(--ink)}body.admin-light .status{background:#f8fbfa;color:var(--muted)}body.admin-light button.danger{background:#fff4f3;border-color:#dc8b84;color:#9f1f17}body.admin-light .cover{background:#f4f7f8}body.admin-light input::file-selector-button{background:#eef2f4;color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:6px 10px;font-weight:800}
 </style>
@@ -1213,6 +1299,15 @@ body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:
 <label>Upload Date <input name="upload_date" type="date"></label>
 <input name="flipbook_type" type="hidden" value="__SECTION__">
 <label>Version Notes <textarea name="version_notes" placeholder="What changed in this upload?"></textarea></label>
+<fieldset>
+<legend>Registration</legend>
+<label>Saved HubSpot form <select class="saved-form">__SAVED_FORM_OPTIONS__</select></label>
+<label class="check-row"><input name="registration_required_toggle" type="checkbox"> Require HubSpot registration</label>
+<label>HubSpot Portal ID <input name="registration_portal_id" type="text" value="__HUBSPOT_PORTAL_ID__"></label>
+<label>HubSpot Form ID <input name="registration_form_id" type="text" placeholder="ca14e4bc-4743-4ed4-a010-36be9140ec09"></label>
+<label>Form Label <input name="registration_label_value" type="text" placeholder="Landing Page: 2026 Resiliency ebook"></label>
+<label>Campaign name in HubSpot <input name="registration_campaign" type="text" list="hubspot-campaigns" placeholder="Exact campaign name"></label>
+</fieldset>
 <button class="primary" type="submit">Upload New</button>
 </form>
 <form class="panel form-grid" id="replaceForm">
@@ -1226,6 +1321,21 @@ body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:
 <h2>Delete a Flipbook</h2>
 <p class="empty">Select one flipbook below, then delete it from storage.</p>
 <button class="danger" type="submit">Delete Selected</button>
+</form>
+<form class="panel form-grid" id="registrationForm">
+<h2>Registration Capture</h2>
+<label>Saved HubSpot form <select class="saved-form">__SAVED_FORM_OPTIONS__</select></label>
+<p class="empty">Select one flipbook below, then save its HubSpot registration settings.</p>
+<label class="check-row"><input name="registration_required_toggle" type="checkbox"> Require HubSpot registration</label>
+<label>HubSpot Portal ID <input name="registration_portal_id" type="text" value="__HUBSPOT_PORTAL_ID__"></label>
+<label>HubSpot Form ID <input name="registration_form_id" type="text" placeholder="HubSpot form GUID"></label>
+<label>Form Label <input name="registration_label_value" type="text" placeholder="Landing Page name"></label>
+<label>Campaign name in HubSpot <input name="registration_campaign" type="text" list="hubspot-campaigns" placeholder="Exact campaign name"></label>
+<a href="https://app.hubspot.com/marketing/309276/campaigns" target="_blank" rel="noopener noreferrer">Manage Campaigns in HubSpot</a>
+<a href="https://app.hubspot.com/forms/309276" target="_blank" rel="noopener noreferrer">Manage Forms in HubSpot</a>
+<p class="empty">Create or select the form in HubSpot, associate it with its campaign under Options, then enter the form ID here. Campaign names here are reference labels; they do not change HubSpot associations.</p>
+<datalist id="hubspot-campaigns">__CAMPAIGN_OPTIONS__</datalist>
+<button class="primary" type="submit">Save Registration Settings</button>
 </form>
 </section>
 <section class="admin-content">
@@ -1245,7 +1355,7 @@ __EVENT_ROWS__
 </section>
 </main>
 <script>
-const currentSection=__SECTION_JSON__;const statusEl=document.getElementById('status');const deselectBtn=document.getElementById('deselectBtn');const today=new Date().toISOString().slice(0,10);document.querySelectorAll('input[type=date]').forEach((input)=>{if(!input.value)input.value=today});function setStatus(message){statusEl.textContent=message}function selectedInput(){return document.querySelector('input[name=selectedSlug]:checked')}function selectedSlug(){return selectedInput()?.value||''}function selectedTitle(){return selectedInput()?.closest('.publication-row')?.querySelector('.publication-copy strong')?.textContent||selectedSlug()}function updateDeselectState(){deselectBtn.disabled=!selectedSlug()}async function readJson(response){const data=await response.json().catch(()=>({detail:'Request failed.'}));if(!response.ok)throw new Error(data.detail||'Request failed.');return data}async function processPublication(slug,pageCount){let start=1;while(start<=pageCount){setStatus('Processing '+slug+' page '+start+' of '+pageCount+'...');const response=await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/process-batch?start_page='+start+'&limit=5',{method:'POST',body:new FormData()});const data=await readJson(response);if(Number(data.rendered_total)>=Number(data.page_count)){setStatus('Processed '+slug+'.');return data}start=Number(data.next_start_page||data.rendered_total+1)}}document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>input.addEventListener('change',updateDeselectState));deselectBtn.addEventListener('click',()=>{document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>{input.checked=false});updateDeselectState();setStatus('Selection cleared.')});updateDeselectState();document.getElementById('uploadForm').addEventListener('submit',async(event)=>{event.preventDefault();try{setStatus('Uploading new '+currentSection+' flipbook...');const data=await readJson(await fetch('/admin/api/publications/upload',{method:'POST',body:new FormData(event.currentTarget)}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('replaceForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to replace.');return}try{setStatus('Replacing '+slug+'...');const data=await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/replace',{method:'POST',body:new FormData(event.currentTarget)}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('deleteForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to delete.');return}const title=selectedTitle();const confirmed=confirm('Are you sure?\\n\\nThis will delete \"'+title+'\" from the archive and remove its stored PDF, page images, thumbnails, and manifest.\\n\\nClick OK to permanently delete it.');if(!confirmed)return;try{setStatus('Deleting '+slug+'...');await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/delete',{method:'POST',body:new FormData()}));window.location.reload()}catch(error){setStatus(error.message)}});
+const currentSection=__SECTION_JSON__;const statusEl=document.getElementById('status');const deselectBtn=document.getElementById('deselectBtn');const registrationForm=document.getElementById('registrationForm');const today=new Date().toISOString().slice(0,10);document.querySelectorAll('input[type=date]').forEach((input)=>{if(!input.value)input.value=today});function setStatus(message){statusEl.textContent=message}function selectedInput(){return document.querySelector('input[name=selectedSlug]:checked')}function selectedRow(){return selectedInput()?.closest('.publication-row')||null}function selectedSlug(){return selectedInput()?.value||''}function selectedTitle(){return selectedRow()?.querySelector('.publication-copy strong')?.textContent||selectedSlug()}function applyRegistrationFlag(formData,form){formData.set('registration_required',form.querySelector('[name=registration_required_toggle]')?.checked?'true':'false');return formData}function populateRegistrationForm(){const row=selectedRow();if(!registrationForm)return;registrationForm.querySelector('.saved-form').value='';if(!row){registrationForm.reset();registrationForm.querySelector('[name=registration_portal_id]').value='__HUBSPOT_PORTAL_ID__';registrationForm.querySelector('[name=registration_required_toggle]').checked=false;return}registrationForm.querySelector('[name=registration_required_toggle]').checked=row.dataset.registrationRequired==='true';registrationForm.querySelector('[name=registration_portal_id]').value=row.dataset.registrationPortalId||'__HUBSPOT_PORTAL_ID__';registrationForm.querySelector('[name=registration_form_id]').value=row.dataset.registrationFormId||'';registrationForm.querySelector('[name=registration_label_value]').value=row.dataset.registrationLabel||'';registrationForm.querySelector('[name=registration_campaign]').value=row.dataset.registrationCampaign||''}function updateDeselectState(){deselectBtn.disabled=!selectedSlug();populateRegistrationForm()}async function readJson(response){const data=await response.json().catch(()=>({detail:'Request failed.'}));if(!response.ok)throw new Error(data.detail||'Request failed.');return data}async function processPublication(slug,pageCount){let start=1;while(start<=pageCount){setStatus('Processing '+slug+' page '+start+' of '+pageCount+'...');const response=await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/process-batch?start_page='+start+'&limit=5',{method:'POST',body:new FormData()});const data=await readJson(response);if(Number(data.rendered_total)>=Number(data.page_count)){setStatus('Processed '+slug+'.');return data}start=Number(data.next_start_page||data.rendered_total+1)}}document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>input.addEventListener('change',updateDeselectState));deselectBtn.addEventListener('click',()=>{document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>{input.checked=false});updateDeselectState();setStatus('Selection cleared.')});updateDeselectState();document.getElementById('uploadForm').addEventListener('submit',async(event)=>{event.preventDefault();try{setStatus('Uploading new '+currentSection+' flipbook...');const formData=applyRegistrationFlag(new FormData(event.currentTarget),event.currentTarget);const data=await readJson(await fetch('/admin/api/publications/upload',{method:'POST',body:formData}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('replaceForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to replace.');return}try{setStatus('Replacing '+slug+'...');const data=await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/replace',{method:'POST',body:new FormData(event.currentTarget)}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});registrationForm.addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to update registration.');return}try{setStatus('Saving registration settings for '+slug+'...');const formData=applyRegistrationFlag(new FormData(event.currentTarget),event.currentTarget);await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/metadata',{method:'POST',body:formData}));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('deleteForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to delete.');return}const title=selectedTitle();const confirmed=confirm('Are you sure?\\n\\nThis will delete \"'+title+'\" from the archive and remove its stored PDF, page images, thumbnails, and manifest.\\n\\nClick OK to permanently delete it.');if(!confirmed)return;try{setStatus('Deleting '+slug+'...');await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/delete',{method:'POST',body:new FormData()}));window.location.reload()}catch(error){setStatus(error.message)}});document.querySelectorAll('.saved-form').forEach((select)=>select.addEventListener('change',()=>{const option=select.selectedOptions[0];if(!option.value)return;const form=select.closest('form');form.querySelector('[name=registration_form_id]').value=option.value;form.querySelector('[name=registration_portal_id]').value=option.dataset.portal;form.querySelector('[name=registration_campaign]').value=option.dataset.campaign;form.querySelector('[name=registration_label_value]').value=option.dataset.label;form.querySelector('[name=registration_required_toggle]').checked=true}));
 </script>
 </body>
 </html>"""
@@ -1256,6 +1366,9 @@ const currentSection=__SECTION_JSON__;const statusEl=document.getElementById('st
         .replace("__SECTION_JSON__", section_json)
         .replace("__SECTION__", selected_section)
         .replace("__SECTION_LABEL__", section_label)
+        .replace("__HUBSPOT_PORTAL_ID__", HUBSPOT_PORTAL_ID)
+        .replace("__SAVED_FORM_OPTIONS__", form_options)
+        .replace("__CAMPAIGN_OPTIONS__", "".join('<option value="{}"></option>'.format(html.escape(name, quote=True)) for name in sorted({p.get("registration_campaign") for p in publications if p.get("registration_campaign")})))
         .replace("__MAGAZINE_HREF__", magazine_href)
         .replace("__EBOOK_HREF__", ebook_href)
         .replace("__MAGAZINE_ACTIVE__", magazine_active)
@@ -1510,6 +1623,11 @@ def admin_upload_publication_pdf(
     upload_date: str | None = Form(default=None),
     version_notes: str | None = Form(default=None),
     flipbook_type: str | None = Form(default="magazine"),
+    registration_required: str | None = Form(default=None),
+    registration_portal_id: str | None = Form(default=None),
+    registration_form_id: str | None = Form(default=None),
+    registration_label_value: str | None = Form(default=None),
+    registration_campaign: str | None = Form(default=None),
 ) -> dict[str, Any]:
     require_admin_request(request)
     filename_stem = Path(file.filename or "").stem
@@ -1525,6 +1643,11 @@ def admin_upload_publication_pdf(
         flipbook_type=flipbook_type,
         upload_date=upload_date,
         version_notes=version_notes,
+        registration_required=form_truthy(registration_required),
+        registration_portal_id=registration_portal_id,
+        registration_form_id=registration_form_id,
+        registration_label_value=registration_label_value,
+        registration_campaign=registration_campaign,
     )
     record_archive_event(
         action="uploaded",
@@ -1558,6 +1681,11 @@ def admin_replace_publication_pdf(
         flipbook_type=str(existing_manifest.get("flipbook_type") or "magazine"),
         upload_date=upload_date,
         version_notes=version_notes,
+        registration_required=registration_enabled(existing_manifest),
+        registration_portal_id=str(existing_manifest.get("registration_portal_id") or HUBSPOT_PORTAL_ID),
+        registration_form_id=str(existing_manifest.get("registration_form_id") or ""),
+        registration_label_value=str(existing_manifest.get("registration_label") or ""),
+        registration_campaign=str(existing_manifest.get("registration_campaign") or ""),
     )
     record_archive_event(
         action="updated",
@@ -1828,6 +1956,11 @@ def admin_update_publication_metadata(
     interactive_url: str | None = Form(default=None),
     source_url: str | None = Form(default=None),
     publication_date: str | None = Form(default=None),
+    registration_required: str | None = Form(default=None),
+    registration_portal_id: str | None = Form(default=None),
+    registration_form_id: str | None = Form(default=None),
+    registration_label_value: str | None = Form(default=None),
+    registration_campaign: str | None = Form(default=None),
 ) -> dict[str, Any]:
     require_admin_request(request)
     normalized_slug = validate_slug(slug)
@@ -1851,6 +1984,25 @@ def admin_update_publication_metadata(
             raise HTTPException(status_code=400, detail="Publication date must use YYYY-MM-DD format.")
         manifest["publication_date"] = cleaned_publication_date
 
+    if registration_portal_id is not None:
+        manifest["registration_portal_id"] = registration_portal_id.strip() or HUBSPOT_PORTAL_ID
+
+    if registration_form_id is not None:
+        manifest["registration_form_id"] = registration_form_id.strip()
+
+    if registration_label_value is not None:
+        manifest["registration_label"] = registration_label_value.strip()
+
+    if registration_campaign is not None:
+        manifest["registration_campaign"] = normalize_registration_campaign(registration_campaign)
+
+    if registration_required is not None:
+        manifest["registration_required"] = form_truthy(registration_required)
+
+    validate_registration_settings(bool(manifest.get("registration_required")),
+        str(manifest.get("registration_portal_id") or HUBSPOT_PORTAL_ID),
+        str(manifest.get("registration_form_id") or ""))
+
     manifest["updated_at"] = now_iso()
     write_manifest(normalized_slug, manifest)
     record_archive_event(
@@ -1866,6 +2018,11 @@ def admin_update_publication_metadata(
         "interactive_url": manifest.get("interactive_url") or "",
         "source_url": manifest.get("source_url") or "",
         "publication_date": manifest.get("publication_date") or "",
+        "registration_required": registration_enabled(manifest),
+        "registration_portal_id": manifest.get("registration_portal_id") or HUBSPOT_PORTAL_ID,
+        "registration_form_id": manifest.get("registration_form_id") or "",
+        "registration_label": manifest.get("registration_label") or "",
+        "registration_campaign": manifest.get("registration_campaign") or "",
     }
 
 
