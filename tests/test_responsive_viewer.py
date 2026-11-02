@@ -3,6 +3,20 @@ import main
 
 
 class ResponsiveViewerTests(unittest.TestCase):
+    def test_magazine_intro_survives_new_issues(self):
+        for slug in ('green-builder-q4-2026', 'future-issue'):
+            page = main.featured_description_markup(dict(slug=slug,
+                title='New Issue', description='Uploaded from admin'), 'magazine')
+            self.assertIn('For 21 years', page)
+            self.assertIn('mailto:', page)
+            self.assertIn('matt-power-headshot-640.jpg', page)
+            self.assertIn('width="250"', page)
+            self.assertNotIn('Q3 2026', page)
+
+    def test_ebook_description_is_unchanged(self):
+        page = main.featured_description_markup(dict(description='Ebook summary'), 'ebook')
+        self.assertEqual(page, '<p class="lede">Ebook summary</p>')
+
     def test_both_viewers_have_white_responsive_chrome(self):
         for kind in ('magazine', 'ebook'):
             for embedded in (True, False):

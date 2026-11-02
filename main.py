@@ -992,10 +992,10 @@ def publication_summary(manifest: dict[str, Any]) -> dict[str, str]:
 
 
 def featured_description_markup(publication: dict[str, str], selected_type: str) -> str:
-    if selected_type == "magazine" and publication.get("slug") == "green-builder-q3-2026":
+    if selected_type == "magazine":
         subscription_url = html.escape(MAGAZINE_SUBSCRIPTION_URL)
         editor_email = html.escape(EDITOR_EMAIL)
-        return f"""<div class="current-copy"><p class="issue-label">Q3 2026</p><p class="subscribe-line"><a href="{subscription_url}" {hs_tracking_attrs(publication, "subscribe")}>Download the current issue for FREE--Or click here to subscribe for a print subscription of <em>Green Builder</em> magazine for only $39.95 a year!</a></p><p>For 21 years, <em>Green Builder</em> has inspired and informed the U.S. construction industry with ideas, building science and innovative approaches to shelter.</p><p>Take a few minutes, or an hour, and peruse our latest issue, and our library below. If you do not find something you can use, <a href="mailto:{editor_email}">drop me an email</a>, and I will add it to the to do list. Thanks for checking in.--Matt Power, Editor-in-Chief</p></div>"""
+        return f"""<div class="current-copy"><p class="subscribe-line"><a href="{subscription_url}" {hs_tracking_attrs(publication, "subscribe")}>Download the current issue for FREE--Or click here to subscribe for a print subscription of <em>Green Builder</em> magazine for only $39.95 a year!</a></p><p>For 21 years, <em>Green Builder</em> has inspired and informed the U.S. construction industry with ideas, building science and innovative approaches to shelter.</p><p>Take a few minutes, or an hour, and peruse our latest issue, and our library below. If you do not find something you can use, <a href="mailto:{editor_email}">drop me an email</a>, and I will add it to the to do list. Thanks for checking in.--Matt Power, Editor-in-Chief</p><img src="https://www.greenbuildermedia.com/hubfs/matt-power-headshot-640.jpg" alt="Matt Power, Editor-in-Chief" width="250" height="233" style="display:block;max-width:100%;height:auto;margin:0 0 20px" loading="lazy"></div>"""
 
     return f"""<p class="lede">{html.escape(publication["description"])}</p>"""
 
