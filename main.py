@@ -7,6 +7,7 @@ import re
 import secrets
 import shutil
 import tempfile
+import threading
 from starlette.background import BackgroundTask
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,12 +15,14 @@ from typing import Any
 
 import pymupdf
 from issue_summaries import issue_blurb, summary_button, summary_dialog_markup, summary_styles
+from summary_generation import generate_summary, SummaryUnavailable
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pypdf import PdfReader
 from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, NumberObject
 
 APP_NAME = "GBM Flipbook"
+summary_generation_lock = threading.Lock()
 DEFAULT_STORAGE_PATH = "/data/flipbooks"
 FALLBACK_STORAGE_PATH = "/tmp/flipbooks"
 PAGE_RENDER_SCALE = float(os.getenv("PAGE_RENDER_SCALE", "1.5"))
@@ -1339,7 +1342,7 @@ body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:
 <h2>Upload New __SECTION_LABEL__</h2>
 <label>PDF<input name="file" type="file" accept="application/pdf" required></label>
 <label>Issue Title <input name="issue_title" type="text" placeholder="Optional"></label>
-<label class="magazine-summary-field">Issue summary <textarea name="summary_blurb" maxlength="2400" placeholder="A short, conversational summary of this issue"></textarea></label>
+<label class="magazine-summary-field">Issue summary <textarea name="summary_blurb" maxlength="2400" placeholder="Optional: leave blank to draft a 60-word summary automatically"></textarea></label>
 <label>Upload Date <input name="upload_date" type="date"></label>
 <input name="flipbook_type" type="hidden" value="__SECTION__">
 <label>Version Notes <textarea name="version_notes" placeholder="What changed in this upload?"></textarea></label>
@@ -1382,7 +1385,7 @@ body.admin-light{color-scheme:light;--bg:#ffffff;--panel:#ffffff;--panel-strong:
 <button class="primary" type="submit">Save Registration Settings</button>
 </form>
 </section>
-<form class="panel form-grid" id="summaryForm" style="margin:20px 0"><h2>Issue Summary</h2><p>Select a magazine below to edit the blurb shown in the archive. Replacing its PDF keeps this summary.</p><label>Summary blurb<textarea id="summaryBlurb" name="summary_blurb" maxlength="2400" rows="5"></textarea></label><button class="primary" type="submit">Save Summary</button></form>
+<form class="panel form-grid" id="summaryForm" style="margin:20px 0"><h2>Issue Summary</h2><p>Select a magazine below to edit the blurb shown in the archive. Replacing its PDF keeps this summary.</p><label>Summary blurb<textarea id="summaryBlurb" name="summary_blurb" maxlength="2400" rows="5"></textarea></label><button class="primary" type="submit">Save Summary</button><button type="button" id="draftSummaryBtn">Draft Missing Summary</button><p>New magazines receive an automatic 60-word draft when this field is left blank. Existing summaries stay unchanged when a PDF is replaced.</p></form>
 <section class="admin-content">
 <div>
 <div class="list-tools"><button type="button" id="deselectBtn" disabled>Deselect</button></div>
@@ -1400,7 +1403,7 @@ __EVENT_ROWS__
 </section>
 </main>
 <script>
-const currentSection=__SECTION_JSON__;if(currentSection!=='magazine'){document.getElementById('summaryForm').style.display='none';document.querySelectorAll('.magazine-summary-field').forEach(el=>el.style.display='none')};document.getElementById('summaryForm').addEventListener('submit',async event=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select a magazine to edit its summary.');return}try{await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/metadata',{method:'POST',body:new FormData(event.currentTarget)}));window.location.reload()}catch(error){setStatus(error.message)}});const statusEl=document.getElementById('status');const deselectBtn=document.getElementById('deselectBtn');const registrationForm=document.getElementById('registrationForm');const today=new Date().toISOString().slice(0,10);document.querySelectorAll('input[type=date]').forEach((input)=>{if(!input.value)input.value=today});function setStatus(message){statusEl.textContent=message}function selectedInput(){return document.querySelector('input[name=selectedSlug]:checked')}function selectedRow(){return selectedInput()?.closest('.publication-row')||null}function selectedSlug(){return selectedInput()?.value||''}function selectedTitle(){return selectedRow()?.querySelector('.publication-copy strong')?.textContent||selectedSlug()}function applyRegistrationFlag(formData,form){formData.set('registration_required',form.querySelector('[name=registration_required_toggle]')?.checked?'true':'false');return formData}function populateRegistrationForm(){const row=selectedRow();if(!registrationForm)return;registrationForm.querySelector('.saved-form').value='';if(!row){registrationForm.reset();registrationForm.querySelector('[name=registration_portal_id]').value='__HUBSPOT_PORTAL_ID__';registrationForm.querySelector('[name=registration_required_toggle]').checked=false;return}registrationForm.querySelector('[name=registration_required_toggle]').checked=row.dataset.registrationRequired==='true';registrationForm.querySelector('[name=registration_portal_id]').value=row.dataset.registrationPortalId||'__HUBSPOT_PORTAL_ID__';registrationForm.querySelector('[name=registration_form_id]').value=row.dataset.registrationFormId||'';registrationForm.querySelector('[name=registration_label_value]').value=row.dataset.registrationLabel||'';registrationForm.querySelector('[name=registration_campaign]').value=row.dataset.registrationCampaign||''}function updateDeselectState(){deselectBtn.disabled=!selectedSlug();populateRegistrationForm();document.getElementById('summaryBlurb').value=selectedRow()?.dataset.summary||''}async function readJson(response){const data=await response.json().catch(()=>({detail:'Request failed.'}));if(!response.ok)throw new Error(data.detail||'Request failed.');return data}async function processPublication(slug,pageCount){let start=1;while(start<=pageCount){setStatus('Processing '+slug+' page '+start+' of '+pageCount+'...');const response=await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/process-batch?start_page='+start+'&limit=5',{method:'POST',body:new FormData()});const data=await readJson(response);if(Number(data.rendered_total)>=Number(data.page_count)){setStatus('Processed '+slug+'.');return data}start=Number(data.next_start_page||data.rendered_total+1)}}document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>input.addEventListener('change',updateDeselectState));deselectBtn.addEventListener('click',()=>{document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>{input.checked=false});updateDeselectState();setStatus('Selection cleared.')});updateDeselectState();document.getElementById('uploadForm').addEventListener('submit',async(event)=>{event.preventDefault();try{setStatus('Uploading new '+currentSection+' flipbook...');const formData=applyRegistrationFlag(new FormData(event.currentTarget),event.currentTarget);const data=await readJson(await fetch('/admin/api/publications/upload',{method:'POST',body:formData}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('replaceForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to replace.');return}try{setStatus('Replacing '+slug+'...');const data=await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/replace',{method:'POST',body:new FormData(event.currentTarget)}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});registrationForm.addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to update registration.');return}try{setStatus('Saving registration settings for '+slug+'...');const formData=applyRegistrationFlag(new FormData(event.currentTarget),event.currentTarget);await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/metadata',{method:'POST',body:formData}));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('deleteForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to delete.');return}const title=selectedTitle();const confirmed=confirm('Are you sure?\\n\\nThis will delete \"'+title+'\" from the archive and remove its stored PDF, page images, thumbnails, and manifest.\\n\\nClick OK to permanently delete it.');if(!confirmed)return;try{setStatus('Deleting '+slug+'...');await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/delete',{method:'POST',body:new FormData()}));window.location.reload()}catch(error){setStatus(error.message)}});document.querySelectorAll('.saved-form').forEach((select)=>select.addEventListener('change',()=>{const option=select.selectedOptions[0];if(!option.value)return;const form=select.closest('form');form.querySelector('[name=registration_form_id]').value=option.value;form.querySelector('[name=registration_portal_id]').value=option.dataset.portal;form.querySelector('[name=registration_campaign]').value=option.dataset.campaign;form.querySelector('[name=registration_label_value]').value=option.dataset.label;form.querySelector('[name=registration_required_toggle]').checked=true}));
+const currentSection=__SECTION_JSON__;async function draftIssueSummary(slug){setStatus('Drafting a 60-word issue summary...');return await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/generate-summary',{method:'POST'}))}document.getElementById('draftSummaryBtn').addEventListener('click',async()=>{const slug=selectedSlug();if(!slug){setStatus('Select a new magazine first.');return}const button=document.getElementById('draftSummaryBtn');button.disabled=true;try{const data=await draftIssueSummary(slug);document.getElementById('summaryBlurb').value=data.summary_blurb;selectedRow().dataset.summary=data.summary_blurb;setStatus(data.status==='existing'?'Existing summary preserved.':'60-word summary saved.')}catch(error){setStatus(error.message)}finally{button.disabled=false}});if(currentSection!=='magazine'){document.getElementById('summaryForm').style.display='none';document.querySelectorAll('.magazine-summary-field').forEach(el=>el.style.display='none')};document.getElementById('summaryForm').addEventListener('submit',async event=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select a magazine to edit its summary.');return}try{await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/metadata',{method:'POST',body:new FormData(event.currentTarget)}));window.location.reload()}catch(error){setStatus(error.message)}});const statusEl=document.getElementById('status');const deselectBtn=document.getElementById('deselectBtn');const registrationForm=document.getElementById('registrationForm');const today=new Date().toISOString().slice(0,10);document.querySelectorAll('input[type=date]').forEach((input)=>{if(!input.value)input.value=today});function setStatus(message){statusEl.textContent=message}function selectedInput(){return document.querySelector('input[name=selectedSlug]:checked')}function selectedRow(){return selectedInput()?.closest('.publication-row')||null}function selectedSlug(){return selectedInput()?.value||''}function selectedTitle(){return selectedRow()?.querySelector('.publication-copy strong')?.textContent||selectedSlug()}function applyRegistrationFlag(formData,form){formData.set('registration_required',form.querySelector('[name=registration_required_toggle]')?.checked?'true':'false');return formData}function populateRegistrationForm(){const row=selectedRow();if(!registrationForm)return;registrationForm.querySelector('.saved-form').value='';if(!row){registrationForm.reset();registrationForm.querySelector('[name=registration_portal_id]').value='__HUBSPOT_PORTAL_ID__';registrationForm.querySelector('[name=registration_required_toggle]').checked=false;return}registrationForm.querySelector('[name=registration_required_toggle]').checked=row.dataset.registrationRequired==='true';registrationForm.querySelector('[name=registration_portal_id]').value=row.dataset.registrationPortalId||'__HUBSPOT_PORTAL_ID__';registrationForm.querySelector('[name=registration_form_id]').value=row.dataset.registrationFormId||'';registrationForm.querySelector('[name=registration_label_value]').value=row.dataset.registrationLabel||'';registrationForm.querySelector('[name=registration_campaign]').value=row.dataset.registrationCampaign||''}function updateDeselectState(){deselectBtn.disabled=!selectedSlug();populateRegistrationForm();document.getElementById('summaryBlurb').value=selectedRow()?.dataset.summary||''}async function readJson(response){const data=await response.json().catch(()=>({detail:'Request failed.'}));if(!response.ok)throw new Error(data.detail||'Request failed.');return data}async function processPublication(slug,pageCount){let start=1;while(start<=pageCount){setStatus('Processing '+slug+' page '+start+' of '+pageCount+'...');const response=await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/process-batch?start_page='+start+'&limit=5',{method:'POST',body:new FormData()});const data=await readJson(response);if(Number(data.rendered_total)>=Number(data.page_count)){setStatus('Processed '+slug+'.');return data}start=Number(data.next_start_page||data.rendered_total+1)}}document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>input.addEventListener('change',updateDeselectState));deselectBtn.addEventListener('click',()=>{document.querySelectorAll('input[name=selectedSlug]').forEach((input)=>{input.checked=false});updateDeselectState();setStatus('Selection cleared.')});updateDeselectState();document.getElementById('uploadForm').addEventListener('submit',async(event)=>{event.preventDefault();try{setStatus('Uploading new '+currentSection+' flipbook...');const formData=applyRegistrationFlag(new FormData(event.currentTarget),event.currentTarget);const data=await readJson(await fetch('/admin/api/publications/upload',{method:'POST',body:formData}));await processPublication(data.slug,Number(data.page_count));if(currentSection==='magazine'&&!String(formData.get('summary_blurb')||'').trim()){try{await draftIssueSummary(data.slug)}catch(error){alert('PDF uploaded successfully. '+error.message)}}window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('replaceForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to replace.');return}try{setStatus('Replacing '+slug+'...');const data=await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/replace',{method:'POST',body:new FormData(event.currentTarget)}));await processPublication(data.slug,Number(data.page_count));window.location.reload()}catch(error){setStatus(error.message)}});registrationForm.addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to update registration.');return}try{setStatus('Saving registration settings for '+slug+'...');const formData=applyRegistrationFlag(new FormData(event.currentTarget),event.currentTarget);await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/metadata',{method:'POST',body:formData}));window.location.reload()}catch(error){setStatus(error.message)}});document.getElementById('deleteForm').addEventListener('submit',async(event)=>{event.preventDefault();const slug=selectedSlug();if(!slug){setStatus('Select one flipbook to delete.');return}const title=selectedTitle();const confirmed=confirm('Are you sure?\\n\\nThis will delete \"'+title+'\" from the archive and remove its stored PDF, page images, thumbnails, and manifest.\\n\\nClick OK to permanently delete it.');if(!confirmed)return;try{setStatus('Deleting '+slug+'...');await readJson(await fetch('/admin/api/publications/'+encodeURIComponent(slug)+'/delete',{method:'POST',body:new FormData()}));window.location.reload()}catch(error){setStatus(error.message)}});document.querySelectorAll('.saved-form').forEach((select)=>select.addEventListener('change',()=>{const option=select.selectedOptions[0];if(!option.value)return;const form=select.closest('form');form.querySelector('[name=registration_form_id]').value=option.value;form.querySelector('[name=registration_portal_id]').value=option.dataset.portal;form.querySelector('[name=registration_campaign]').value=option.dataset.campaign;form.querySelector('[name=registration_label_value]').value=option.dataset.label;form.querySelector('[name=registration_required_toggle]').checked=true}));
 </script>
 </body>
 </html>"""
@@ -1741,6 +1744,11 @@ def admin_upload_publication_pdf(
         manifest = read_manifest(result["slug"])
         manifest["summary_blurb"] = summary_blurb.strip()[:2400]
         write_manifest(result["slug"], manifest)
+    elif flipbook_type == "magazine":
+        manifest = read_manifest(result["slug"])
+        manifest["summary_generation_eligible"] = True
+        manifest["summary_generation_status"] = "pending"
+        write_manifest(result["slug"], manifest)
     record_archive_event(
         action="uploaded",
         slug=result["slug"],
@@ -1749,6 +1757,38 @@ def admin_upload_publication_pdf(
         notes=version_notes,
     )
     return result
+
+
+@app.post("/admin/api/publications/{slug}/generate-summary")
+def admin_generate_summary(slug: str, request: Request) -> dict[str, Any]:
+    require_admin_request(request)
+    normalized_slug = validate_slug(slug)
+    if not summary_generation_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Another summary is being drafted. Please try again shortly.")
+    try:
+        manifest = read_manifest(normalized_slug)
+        if issue_blurb(manifest):
+            return {"status": "existing", "summary_blurb": issue_blurb(manifest)}
+        if manifest.get("flipbook_type") != "magazine" or not manifest.get("summary_generation_eligible"):
+            raise HTTPException(status_code=409, detail="Automatic drafting is only available for new magazine uploads.")
+        try:
+            summary = generate_summary(manifest["original_pdf_path"], str(manifest.get("title") or normalized_slug))
+        except (SummaryUnavailable, OSError, ValueError) as error:
+            message = str(error) if isinstance(error, SummaryUnavailable) else "Could not read the PDF for its summary. Your upload is saved."
+            raise HTTPException(status_code=503, detail=message) from None
+        current = read_manifest(normalized_slug)
+        if current != manifest:
+            raise HTTPException(status_code=409, detail="This issue changed while its summary was drafting. Please refresh and retry.")
+        current["summary_blurb"] = summary
+        current["summary_generation_status"] = "generated"
+        current["summary_generation_eligible"] = False
+        current["updated_at"] = now_iso()
+        write_manifest(normalized_slug, current)
+        record_archive_event(action="updated", slug=normalized_slug, title=str(current.get("title") or normalized_slug),
+            flipbook_type="magazine", notes="Automatically drafted a 60-word issue summary.")
+        return {"status": "generated", "summary_blurb": summary}
+    finally:
+        summary_generation_lock.release()
 
 
 @app.post("/admin/api/publications/{slug}/replace")
@@ -2063,6 +2103,8 @@ def admin_update_publication_metadata(
         if len(summary_blurb) > 2400:
             raise HTTPException(status_code=400, detail="Summary must be 2400 characters or fewer.")
         manifest["summary_blurb"] = summary_blurb.strip()
+        manifest["summary_generation_status"] = "manual"
+        manifest["summary_generation_eligible"] = False
 
     if interactive_url is not None:
         cleaned_interactive_url = external_url(interactive_url)

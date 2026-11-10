@@ -23,8 +23,10 @@ def summary_button(publication):
 
 def summary_styles():
     return '''
-.featured-heading{grid-column:2;grid-row:1}.featured-visual{grid-column:1;grid-row:2;min-width:0}.featured-copy{grid-column:2;grid-row:2}
+.featured{grid-template-rows:auto 1fr}.featured-heading{grid-column:2;grid-row:1}.featured-visual{grid-column:1;grid-row:1 / 3;min-width:0}.featured-copy{grid-column:2;grid-row:2}
 .issue-blurb{margin:32px 0 0;font-size:17px;line-height:1.6;color:var(--muted)}
+.issue-blurb::first-letter{float:left;font-family:Georgia,serif;font-size:3.6em;line-height:.85;margin:6px 8px 0 0;color:var(--ink)}
+.issue-blurb::after{content:"";display:block;clear:both}
 .summary-link{display:block;margin:12px auto 0;padding:6px 10px;border:0;background:transparent;color:#087f59;font:700 13px Arial,sans-serif;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
 .summary-link:focus-visible,.summary-close:focus-visible{outline:2px solid #087f59;outline-offset:3px}
 .summary-dialog{position:fixed;inset:0;margin:auto;width:min(520px,calc(100% - 32px));max-height:80vh;padding:44px 28px 28px;border:1px solid #dde5ea;border-radius:8px;background:#fff;color:#303052;box-shadow:0 16px 60px #0003}
