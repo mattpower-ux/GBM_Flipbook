@@ -1161,13 +1161,13 @@ body.registration-unlocked .registration-gate{display:none}.registration-card{co
 </style>
 <style id="responsive-white-viewer">
 :root{color-scheme:light;--bg:#fff;--bg-soft:#fff;--panel:#fff;--panel-strong:#f2f6f4;--ink:#303052;--muted:#4f5e68;--line:#d8e0e5;--brand:#087f59;--brand-dark:#e8f5ef;--paper:#fff}
-html,body{width:100%;height:100%;overflow:hidden;background:#fff}
+html,body{width:100%;height:100%;overflow:auto;overscroll-behavior:auto;background:#fff}
 .app{width:100%;height:100vh;height:100dvh;min-height:0;grid-template-rows:auto minmax(0,1fr);background:#fff}
 header,aside,.layout,.stage-wrap,.reader-bar,.registration-gate,.thumb img{background:#fff}
 header{position:relative;min-width:0}
-.layout{overflow:hidden;min-width:0;grid-template-columns:120px minmax(0,1fr)}
+.layout{overflow:clip;min-width:0;grid-template-columns:120px minmax(0,1fr)}
 aside{min-height:0;min-width:0;overscroll-behavior:contain}
-.stage-wrap{display:flex;flex-direction:column;overflow:hidden;padding:16px 20px 54px}
+.stage-wrap{display:flex;flex-direction:column;overflow:clip;padding:16px 20px 54px}
 .reader-bar{position:relative;top:auto;width:100%;flex:0 0 auto;display:flex;flex-wrap:wrap;box-shadow:none;backdrop-filter:none;gap:10px}
 .toolbar,.reader-actions{min-width:0;flex-wrap:wrap;overflow:visible;padding:0;gap:6px}
 .reader-actions{margin-left:auto}
