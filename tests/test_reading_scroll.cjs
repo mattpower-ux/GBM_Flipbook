@@ -1,0 +1,16 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const src=fs.readFileSync('main.py','utf8');
+const code=src.match(/function scrollReadingArea\(event\)\{[\s\S]*?\}stageWrap.addEventListener\('wheel',scrollReadingArea,\{passive:false\}\)/);
+assert.ok(code,'Reading area wheel handler exists');
+const stage={scrollTop:0,scrollLeft:0,scrollHeight:1200,clientHeight:600,scrollWidth:1000,clientWidth:800};
+const c={stage,stageWrap:{addEventListener(){}}};vm.createContext(c);vm.runInContext(code[0],c);
+let prevented=false;
+const e={deltaX:0,deltaY:100,deltaMode:0,target:{closest:()=>null},preventDefault(){prevented=true}};
+c.scrollReadingArea(e);assert.equal(stage.scrollTop,100);assert.ok(prevented);
+c.scrollReadingArea({...e,deltaMode:1,deltaY:3});assert.equal(stage.scrollTop,148);
+c.scrollReadingArea({...e,deltaMode:2,deltaY:1});assert.equal(stage.scrollTop,600);
+prevented=false;c.scrollReadingArea(e);assert.equal(prevented,false);
+c.scrollReadingArea({...e,deltaX:80,deltaY:0});assert.equal(stage.scrollLeft,80);
+c.scrollReadingArea({...e,ctrlKey:true,deltaY:-100});assert.equal(stage.scrollTop,600);
+c.scrollReadingArea({...e,target:{closest:()=>({})},deltaY:-100});assert.equal(stage.scrollTop,600);
+console.log('Wheel routing, delta modes, boundaries, horizontal scrolling and controls passed');
