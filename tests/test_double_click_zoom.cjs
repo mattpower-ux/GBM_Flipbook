@@ -1,0 +1,15 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync('main.py','utf8');
+const match=source.match(/function togglePageZoom\(event\)\{[\s\S]*?\}stage.addEventListener\('dblclick',togglePageZoom\)/);
+assert.ok(match,'Viewer should register double-click zoom');
+let zoom=1,scroll;
+const frame={getBoundingClientRect:()=>({left:20,top:10,width:400*zoom,height:600*zoom})};
+const stage={clientWidth:800,clientHeight:600,clientLeft:0,clientTop:0,scrollLeft:0,scrollTop:0,getBoundingClientRect:()=>({left:0,top:0}),scrollTo:v=>{scroll=v},addEventListener:()=>{}};
+const ctx={stage,setZoom:n=>{zoom=n;ctx.zoom=n},zoom};
+vm.createContext(ctx);vm.runInContext(match[0],ctx);
+const e={clientX:320,clientY:460,preventDefault(){},target:{closest:s=>s==='.page-frame'?frame:null}};
+ctx.togglePageZoom(e);assert.equal(zoom,1.5);assert.equal(scroll.left,70);assert.equal(scroll.top,385);
+ctx.togglePageZoom(e);assert.equal(zoom,1);assert.equal(scroll.left,0);assert.equal(scroll.top,0);
+ctx.togglePageZoom({...e,target:{closest:()=>null}});assert.equal(zoom,1);
+ctx.togglePageZoom({...e,target:{closest:s=>s==='.page-frame'?frame:{}}});assert.equal(zoom,1);
+console.log('Double-click zoom: focal point, fit reset, background and links passed');
