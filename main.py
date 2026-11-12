@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pymupdf
+from pdf_jobs import pdf_job_guard, run_pdf_job
 from issue_summaries import issue_blurb, summary_button, summary_dialog_markup, summary_styles
 from summary_generation import generate_summary, SummaryUnavailable
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -362,6 +363,10 @@ def record_archive_event(
 
 
 def get_pdf_page_count(pdf_path: Path) -> int:
+    return run_pdf_job("page_count", {"pdf_path": str(pdf_path)})
+
+
+def _get_pdf_page_count(pdf_path: Path) -> int:
     try:
         reader = PdfReader(str(pdf_path))
         page_count = len(reader.pages)
@@ -474,7 +479,9 @@ def extract_pdf_links(pdf_path: Path, total_pages: int) -> list[dict[str, Any]]:
     links: list[dict[str, Any]] = []
 
     for page_index, page in enumerate(reader.pages):
-        annotations = page.get("/Annots") or []
+        annotations = get_pdf_object(page.get("/Annots"))
+        if not isinstance(annotations, ArrayObject):
+            continue
         page_width = float(page.mediabox.width)
         page_height = float(page.mediabox.height)
 
@@ -661,6 +668,14 @@ def detect_toc_page_number(links: list[dict[str, Any]]) -> int | None:
 
 
 def render_pdf_page_range(slug: str, pdf_path: Path, start_page: int, limit: int) -> dict[str, Any]:
+    return run_pdf_job("render", {
+        "slug": slug, "pdf_path": str(pdf_path),
+        "storage_path": str(active_storage_path or ensure_storage_path()),
+        "start_page": start_page, "limit": limit,
+    })
+
+
+def _render_pdf_page_range(slug: str, pdf_path: Path, start_page: int, limit: int) -> dict[str, Any]:
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="Original PDF not found.")
 
@@ -726,6 +741,8 @@ def render_pdf_page_range(slug: str, pdf_path: Path, start_page: int, limit: int
                 cover_pixmap.save(str(covers_dir / "cover.jpg"))
                 del cover_pixmap
             del page
+            # Drop decoded native image resources between pages, not just Python pixmaps.
+            pymupdf.TOOLS.store_shrink(100)
 
             page_assets.append(page_asset(page_number, slug))
 
@@ -738,14 +755,15 @@ def render_pdf_page_range(slug: str, pdf_path: Path, start_page: int, limit: int
     }
 
 
+@pdf_job_guard
 def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
     destination_dir = publication_dir(slug)
     pages_dir = destination_dir / "pages"
     thumbs_dir = destination_dir / "thumbs"
+    page_count = get_pdf_page_count(pdf_path)
     reset_directory(pages_dir)
     reset_directory(thumbs_dir)
 
-    page_count = get_pdf_page_count(pdf_path)
     pages = []
     start_page = 1
     while start_page <= page_count:
@@ -764,11 +782,15 @@ def render_pdf_assets(slug: str, pdf_path: Path) -> dict[str, Any]:
 
 
 def refresh_embedded_links(slug: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    return run_pdf_job("links", {"slug": slug, "manifest": manifest})
+
+
+def _refresh_embedded_links(slug: str, manifest: dict[str, Any]) -> dict[str, Any]:
     pdf_path = Path(manifest["original_pdf_path"])
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="Original PDF not found.")
 
-    page_count = int(manifest.get("page_count") or get_pdf_page_count(pdf_path))
+    page_count = int(manifest.get("page_count") or _get_pdf_page_count(pdf_path))
     pdf_links = extract_pdf_links(pdf_path, page_count)
     if manual_toc_page_number(slug):
         pdf_links.extend(get_manual_toc_page_links(slug, page_count, pdf_links))
@@ -798,6 +820,7 @@ def merge_page_assets(existing_pages: list[Any], rendered_pages: list[dict[str, 
     return [pages_by_number[page_number] for page_number in sorted(pages_by_number)]
 
 
+@pdf_job_guard
 def save_publication_upload(
     *,
     slug: str,
@@ -834,24 +857,24 @@ def save_publication_upload(
 
     destination_dir = publication_dir(normalized_slug)
     destination_dir.mkdir(parents=True, exist_ok=True)
-    for asset_dir_name in ("pages", "thumbs"):
-        asset_dir = destination_dir / asset_dir_name
-        if asset_dir.exists():
-            shutil.rmtree(asset_dir)
-
     pdf_path = destination_dir / "original.pdf"
+    staged_path = None
     try:
-        with pdf_path.open("wb") as output_file:
+        # Validate a private candidate before touching an existing publication.
+        with tempfile.NamedTemporaryFile(dir=destination_dir, suffix=".pdf", delete=False) as output_file:
+            staged_path = Path(output_file.name)
             shutil.copyfileobj(file.file, output_file)
+        page_count = get_pdf_page_count(staged_path)
+        staged_path.replace(pdf_path)
+        for asset_dir_name in ("pages", "thumbs"):
+            asset_dir = destination_dir / asset_dir_name
+            if asset_dir.exists():
+                shutil.rmtree(asset_dir)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Uploaded PDF could not be stored: {exc}") from exc
-
-    try:
-        page_count = get_pdf_page_count(pdf_path)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Uploaded PDF page count failed: {exc}") from exc
+    finally:
+        if staged_path is not None:
+            staged_path.unlink(missing_ok=True)
     timestamp = now_iso()
     manifest = {
         "slug": normalized_slug,
@@ -1424,6 +1447,7 @@ const currentSection=__SECTION_JSON__;async function draftIssueSummary(slug){set
     )
 
 
+@pdf_job_guard
 def process_publication_batch(slug: str, start_page: int, limit: int) -> dict[str, Any]:
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
@@ -1431,6 +1455,12 @@ def process_publication_batch(slug: str, start_page: int, limit: int) -> dict[st
     if not manifest.get("links") and not manifest.get("link_extraction_checked_at"):
         try:
             manifest = refresh_embedded_links(normalized_slug, manifest)
+        except HTTPException as exc:
+            if exc.status_code in {409, 503}:
+                raise
+            manifest["links"] = []
+            manifest["toc_page_number"] = None
+            manifest["error"] = f"Embedded link extraction skipped: {exc}"
         except Exception as exc:
             manifest["links"] = []
             manifest["toc_page_number"] = None
@@ -2208,6 +2238,7 @@ def process_publication_pdf_batch(
 
 
 @app.post("/api/publications/{slug}/process")
+@pdf_job_guard
 def process_publication_pdf(slug: str) -> dict[str, Any]:
     normalized_slug = validate_slug(slug)
     manifest = read_manifest(normalized_slug)
@@ -2224,14 +2255,8 @@ def process_publication_pdf(slug: str) -> dict[str, Any]:
         manifest["updated_at"] = now_iso()
         write_manifest(normalized_slug, manifest)
         raise
-    pdf_links = extract_pdf_links(pdf_path, rendered_assets["page_count"])
-    if manual_toc_page_number(normalized_slug):
-        pdf_links.extend(get_manual_toc_page_links(normalized_slug, rendered_assets["page_count"], pdf_links))
-    else:
-        pdf_links.extend(extract_toc_page_links(pdf_path, rendered_assets["page_count"], pdf_links))
     manifest.update(rendered_assets)
-    manifest["links"] = pdf_links
-    manifest["toc_page_number"] = manual_toc_page_number(normalized_slug) or find_toc_page_number(pdf_path) or detect_toc_page_number(pdf_links)
+    pdf_links = manifest.get("links") or []
     manifest["status"] = "processed"
     manifest["processed_at"] = now_iso()
     manifest["updated_at"] = manifest["processed_at"]
