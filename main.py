@@ -32,6 +32,7 @@ COVER_RENDER_SCALE = float(os.getenv("COVER_RENDER_SCALE", "1.8"))
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ASSET_FILENAME_PATTERN = re.compile(r"^page-[0-9]{3,5}\.jpg$")
 VALID_FLIPBOOK_TYPES = {"magazine": "Magazine", "ebook": "Ebook"}
+ARCHIVE_HIDDEN_SLUGS = frozenset({"green-builder-q4-2026-2"})
 ADMIN_PASSWORD_ENV = "FLIPBOOK_ADMIN_PASSWORD"
 DEFAULT_ADMIN_PASSWORD = "1313"
 ADMIN_SESSION_COOKIE = "flipbook_admin_session"
@@ -1081,6 +1082,7 @@ def render_archive_view(
         for publication in publications
         if publication["status"] == "processed"
         and publication["cover_url"]
+        and publication["slug"] not in ARCHIVE_HIDDEN_SLUGS
         and normalize_flipbook_type(publication.get("flipbook_type")) == selected_type
     ]
     for publication in archive_publications:
