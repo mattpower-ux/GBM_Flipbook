@@ -18,7 +18,7 @@ from pdf_jobs import pdf_job_guard, run_pdf_job
 from issue_summaries import issue_blurb, summary_button, summary_dialog_markup, summary_styles
 from summary_generation import generate_summary, SummaryUnavailable
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from pypdf import PdfReader
 from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, NumberObject
 
@@ -1506,6 +1506,15 @@ def startup() -> None:
 @app.get("/")
 def read_root() -> dict[str, str]:
     return {"app": APP_NAME, "message": "GBM Flipbook service is running."}
+
+
+@app.api_route("/robots.txt", methods=["GET", "HEAD"], response_class=PlainTextResponse, include_in_schema=False)
+def robots_txt() -> str:
+    return (
+        "User-agent: GPTBot\n"
+        "Disallow: /api/publications/*/original.pdf\n"
+        "Disallow: /api/publications/*/selected-pages.pdf\n"
+    )
 
 
 @app.get("/health")
